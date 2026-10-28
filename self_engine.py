@@ -1,5 +1,5 @@
-#!/data/data/com.termux/files/usr/bin/python
-"""Bounded decision and recovery engine for the Termux MCP service."""
+#!/usr/bin/env python3
+"""Bounded decision and recovery engine for the Server Connector service."""
 import json
 import os
 import signal

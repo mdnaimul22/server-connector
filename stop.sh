@@ -1,10 +1,8 @@
-#!/data/data/com.termux/files/usr/bin/sh
+#!/usr/bin/env sh
 cd "$(dirname "$0")"
-# Stop supervisors first so their restart loops cannot relaunch child services.
-pkill -f "sh ./supervisor.sh" 2>/dev/null
-sleep 1
-pkill -f "python server.py" 2>/dev/null
-pkill -f "python self_engine.py daemon" 2>/dev/null
-pkill -f "ngrok http" 2>/dev/null
+if [ -f supervisor.pid ]; then pid="$(cat supervisor.pid)"; kill "$pid" 2>/dev/null || true; fi
+for pattern in 'python server.py' 'python3 server.py' 'python self_engine.py daemon' 'python3 self_engine.py daemon'; do
+  if command -v pkill >/dev/null 2>&1; then pkill -f "$pattern" 2>/dev/null || true; fi
+done
 rm -f supervisor.pid
-echo "MCP supervisor, server, engine and tunnel stop requested."
+echo "Server Connector stop requested."

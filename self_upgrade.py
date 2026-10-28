@@ -1,5 +1,5 @@
-#!/data/data/com.termux/files/usr/bin/python
-"""Validated, backup-first updater for the Termux MCP server."""
+#!/usr/bin/env python3
+"""Validated, backup-first updater for the Server Connector service."""
 import json
 import os
 import shutil
