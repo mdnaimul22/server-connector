@@ -1,0 +1,8 @@
+.env
+logs/
+backups/
+__pycache__/
+*.pyc
+supervisor.pid
+self_engine_state.json
+.mcp_jobs/
