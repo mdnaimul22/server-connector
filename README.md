@@ -27,6 +27,10 @@ curl http://127.0.0.1:8765/health
 
 The installer creates `.env` and generates a unique `MCP_TOKEN` if `.env` does not exist. Keep that file private. Stop with `./stop.sh`.
 
+## Live connection profile
+
+See [`CONNECTION.md`](CONNECTION.md) for the current public endpoint, MCP URL, authentication options, health-check URL, and connection instructions. The machine-readable profile is [`connection-profile.json`](connection-profile.json). These are snapshots of the currently running Termux instance; the health endpoint is the source of live availability. Keep the repository private because the token-path endpoint is a credential.
+
 ## Endpoint and configuration
 
 - Health: `GET http://127.0.0.1:8765/health`
