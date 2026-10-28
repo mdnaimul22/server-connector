@@ -15,7 +15,7 @@ fi
 if command -v curl >/dev/null 2>&1; then
   i=0
   while [ "$i" -lt 15 ]; do
-    if curl -fsS --max-time 2 "http://127.0.0.1:${PORT:-8765}/health" >/dev/null 2>&1; then curl -fsS --max-time 2 "http://127.0.0.1:${PORT:-8765}/health"; echo; exit 0; fi
+    if curl -fsS --max-time 2 "http://127.0.0.1:${PORT:-8765}/health" >/dev/null 2>&1; then curl -fsS --max-time 2 "http://127.0.0.1:${PORT:-8765}/health"; echo; sh ./connection-status.sh; exit 0; fi
     sleep 1; i=$((i + 1))
   done
   echo "ERROR: server health did not recover within 15 seconds" >&2; tail -30 logs/supervisor.log logs/server.log 2>/dev/null || true; exit 1
