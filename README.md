@@ -1,60 +1,74 @@
-# Server Connector
+# server-connector
 
-A zero-dependency, self-hostable MCP-over-HTTP server that connects AI agents (such as ChatGPT or Claude) directly to tools and terminals on your own Linux or Android Termux machine.
+Minimal MCP server over HTTP to give ChatGPT, Claude, or any remote MCP client direct shell and file access to an Android phone (Termux) or a Linux machine.
 
-## Supported environments
+Built specifically with the Python standard library only. No `pip install`, no virtualenvs, and no C-extension wheel builds that break on Termux.
 
-- Ubuntu, Debian, Fedora, and other Linux distributions with Python 3
-- Android Termux
+## Why it works this way
 
-## Requirements
+- **Stdlib only:** Runs out of the box on stock Python 3 (`http.server`, `subprocess`, `urllib`).
+- **Single config (`config.yml`):** Everything lives in one file. No `.env` quoting issues or scattered tunnel configs.
+- **Auto tunnel setup:** If `ngrok` isn't installed on the machine, `./start.sh` pulls the right static binary (`amd64` / `arm64` / `arm`) into `./bin/ngrok` and generates the runtime config with public DNS resolvers (`8.8.8.8`, `1.1.1.1`) so Termux DNS doesn't fail.
 
-- Python 3.10 or newer (standard library only; zero external pip packages required)
-- `ngrok` (optional, for remote HTTPS tunnel access)
-
-## Quick Start (Set & Forget)
+## Setup
 
 ```sh
 git clone https://github.com/mdnaimul22/server-connector.git
 cd server-connector
-chmod +x install.sh start.sh stop.sh status.sh
+chmod +x *.sh
 ./install.sh
 ```
 
-Edit `config.yml` (the single source of configuration) to set your tunnel credentials and host settings:
+Open `config.yml` and drop in your ngrok `authtoken` and static `tunnel_domain`:
 
 ```yaml
-authtoken: "YOUR_NGROK_AUTHTOKEN"
+authtoken: "your_ngrok_authtoken"
 tunnel_domain: "your-domain.ngrok-free.dev"
-MCP_TOKEN: "auto-generated-by-install-or-set-your-own"
+MCP_TOKEN: "auto-generated-or-your-own-secret"
 HOST: "127.0.0.1"
 PORT: 8765
 TUNNEL_CMD: ""
 ```
 
-Then start the service:
+Start it:
 
 ```sh
 ./start.sh
 ```
 
-On startup, `./start.sh` (or `./status.sh` at any time) prints the live MCP Connector URL (`https://<tunnel_domain>/mcp/<MCP_TOKEN>`), alternative Bearer authentication details, and live local/remote health status directly in the terminal.
+This starts the background supervisor (`server.py`, `engine.py`, and `ngrok`) and prints the live endpoints right in the terminal:
 
-Stop the service at any time with:
-
-```sh
-./stop.sh
+```text
+MCP Connector URL (POST): https://your-domain.ngrok-free.dev/mcp/<MCP_TOKEN>
+Alt MCP Endpoint (POST) : https://your-domain.ngrok-free.dev/mcp
+Alt Auth Header         : Authorization: Bearer <MCP_TOKEN>
 ```
 
-## Autonomous Configuration (`config.yml`)
+Paste the **MCP Connector URL** into ChatGPT / Claude MCP settings and you're connected.
 
-- **`authtoken`**: Your ngrok agent authtoken. The engine automatically generates a Termux/Linux-compatible runtime config (`logs/ngrok.yml`) with public DNS resolvers (`8.8.8.8`, `1.1.1.1`) so DNS resolution works seamlessly inside Android Termux as well as standard Linux.
-- **`tunnel_domain`**: Your static ngrok domain (e.g., `example.ngrok-free.dev`). If omitted, the status view auto-discovers any active dynamic ngrok URL via the local ngrok API.
-- **`MCP_TOKEN`**: Secret token used to authenticate MCP requests. Automatically generated during `./install.sh` or `./start.sh` if left blank or set to the placeholder value.
-- **`HOST` / `PORT`**: Local bind address and port (default `127.0.0.1:8765`).
-- **`TUNNEL_CMD`**: Leave empty (`""`) for automatic ngrok command generation using `authtoken`, `tunnel_domain`, `HOST`, and `PORT`. Set a custom command if using a different tunnel provider, or `"none"` to disable local tunnel launch.
+## Commands
 
-## Security
+- `./start.sh` — start (or restart after editing `config.yml`) and print status
+- `./status.sh` — check live local + remote tunnel health and print URLs
+- `./stop.sh` — stop supervisor, server, engine, and tunnel processes
+- `./upgrade.py check | apply` — validate and hot-swap `server.py.candidate` with automatic rollback if health checks fail
 
-- `config.yml`, runtime logs, backups, and state files are gitignored. Never commit your live `config.yml`.
-- Treat the full MCP Connector URL (`https://<domain>/mcp/<MCP_TOKEN>`) as a secret credential.
+## Running on multiple machines
+
+Free ngrok accounts allow 1 static domain and 1 active agent session per account. To run this across multiple devices (e.g., Termux on phone + Linux desktop + VPS) at the same time:
+
+1. Use a separate free ngrok account (`authtoken` + `tunnel_domain`) per machine, or
+2. Set `TUNNEL_CMD` in `config.yml` to your own tunnel command (e.g., `cloudflared`, `ssh -R`), or `"none"` if you're reverse-proxying it yourself.
+
+## Files
+
+```text
+config.yml          local config & secrets (gitignored)
+config.example.yml  template config
+server.py           MCP JSON-RPC server & tools
+engine.py           config loader, process watchdog & health checker
+upgrade.py          safe atomic updater with rollback
+supervisor.sh       background process loop
+start.sh / stop.sh  service control
+status.sh           terminal status dashboard
+```
