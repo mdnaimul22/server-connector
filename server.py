@@ -10,9 +10,33 @@ import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-TOKEN = os.environ["MCP_TOKEN"]
-PORT = int(os.environ.get("PORT", "8765"))
-HOST = os.environ.get("HOST", "127.0.0.1")
+def load_config():
+    cfg = {}
+    p = Path(__file__).resolve().parent / "config.yml"
+    if p.is_file():
+        for raw in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or ":" not in line:
+                continue
+            k, v = line.split(":", 1)
+            k, v = k.strip(), v.strip()
+            if not k or k.startswith("-"):
+                continue
+            if v and v[0] in ("'", '"'):
+                end = v.find(v[0], 1)
+                v = v[1:end] if end != -1 else v[1:]
+            elif "#" in v:
+                v = v.split("#", 1)[0].strip()
+            cfg[k] = cfg[k.upper()] = cfg[k.lower()] = v
+    return cfg
+
+
+CFG = load_config()
+TOKEN = os.environ.get("MCP_TOKEN") or CFG.get("MCP_TOKEN") or ""
+if not TOKEN or TOKEN == "REPLACE_WITH_A_LONG_RANDOM_SECRET":
+    raise RuntimeError("Valid MCP_TOKEN is required in config.yml or environment")
+PORT = int(os.environ.get("PORT") or CFG.get("PORT") or "8765")
+HOST = os.environ.get("HOST") or CFG.get("HOST") or "127.0.0.1"
 LIMIT = 20000
 MAX_REQUEST_BYTES = 1_048_576
 MAX_TIMEOUT = 600
@@ -224,7 +248,7 @@ def list_dir(path="~"):
 
 def self_decide():
     root = Path(__file__).resolve().parent
-    p = subprocess.run([os.sys.executable, "self_engine.py", "check"], cwd=str(root),
+    p = subprocess.run([os.sys.executable, "engine.py", "check"], cwd=str(root),
                        capture_output=True, text=True, timeout=20)
     output = (p.stdout or "") + ("\n" + p.stderr if p.stderr else "")
     return clip(output, True), p.returncode != 0

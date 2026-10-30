@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 cd "$(dirname "$0")"
-if ! command -v python3 >/dev/null 2>&1; then
+if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
   if command -v pkg >/dev/null 2>&1; then pkg install -y python curl
   elif command -v apt-get >/dev/null 2>&1; then
     if [ "$(id -u)" -eq 0 ]; then apt-get update && apt-get install -y python3 curl
@@ -13,18 +13,8 @@ if ! command -v python3 >/dev/null 2>&1; then
     else echo "Install python3 and curl, then rerun." >&2; exit 1; fi
   else echo "Install Python 3 and curl with your package manager." >&2; exit 1; fi
 fi
+PYTHON="$(command -v python3 || command -v python)"
 mkdir -p logs
-if [ ! -f .env ]; then
-  cp .env.example .env
-  TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
-  TOKEN="$TOKEN" python3 - <<'PY'
-from pathlib import Path
-import os
-p = Path('.env')
-p.write_text(p.read_text().replace('MCP_TOKEN=REPLACE_WITH_A_LONG_RANDOM_SECRET', 'MCP_TOKEN=' + os.environ['TOKEN']))
-PY
-  echo "Created .env with a unique MCP_TOKEN. Keep it private."
-else echo ".env already exists; leaving it unchanged."; fi
-chmod 600 .env
-chmod +x start.sh stop.sh supervisor.sh install.sh
-echo "Install complete. Start with: ./start.sh"
+"$PYTHON" engine.py init-config
+chmod +x start.sh stop.sh supervisor.sh install.sh status.sh
+echo "Install complete. Edit config.yml if needed, then start with: ./start.sh"

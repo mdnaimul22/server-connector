@@ -16,7 +16,24 @@ LIVE = ROOT / "server.py"
 CANDIDATE = ROOT / "server.py.candidate"
 BACKUPS = ROOT / "backups"
 LOG = ROOT / "logs" / "upgrade.log"
-HEALTH = "http://127.0.0.1:" + os.environ.get("PORT", "8765") + "/health"
+
+
+def load_port():
+    if os.environ.get("PORT"):
+        return os.environ["PORT"]
+    cfg = ROOT / "config.yml"
+    if cfg.is_file():
+        for raw in cfg.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if line and not line.startswith("#") and ":" in line:
+                k, v = line.split(":", 1)
+                if k.strip().upper() == "PORT":
+                    v = v.strip().strip("'\"")
+                    return v.split("#", 1)[0].strip() or "8765"
+    return "8765"
+
+
+HEALTH = "http://127.0.0.1:" + load_port() + "/health"
 
 
 def log(message):
@@ -47,7 +64,7 @@ def health(timeout=2):
 
 
 def server_pids():
-    p = subprocess.run(["sh", "-c", "ps -A -o pid,args | awk '$2 == \"python\" && $3 == \"server.py\" {print $1}'"],
+    p = subprocess.run(["sh", "-c", "ps -A -o pid,args | awk '($2 ~ /(^|\\/)python3?$/ && $3 == \"server.py\") {print $1}'"],
                        capture_output=True, text=True, timeout=5)
     return [int(x) for x in p.stdout.split() if x.isdigit() and int(x) != os.getpid()]
 
@@ -113,7 +130,7 @@ def main():
     if action == "apply":
         print(apply())
         return 0
-    print("usage: self_upgrade.py check|apply")
+    print("usage: upgrade.py check|apply")
     return 2
 
 

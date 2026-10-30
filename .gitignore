@@ -1,8 +1,10 @@
+config.yml
 .env
+bin/
 logs/
 backups/
 __pycache__/
 *.pyc
 supervisor.pid
-self_engine_state.json
+state.json
 .mcp_jobs/

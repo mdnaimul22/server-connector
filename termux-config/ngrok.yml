@@ -1,6 +1,0 @@
-version: "3"
-agent:
-    authtoken: 2szWLffWhxdSUiXaFDJ7VCBYLjf_YBFdoojyPzJTXjfhpV9
-    dns_resolver_ips:
-        - 8.8.8.8
-        - 1.1.1.1

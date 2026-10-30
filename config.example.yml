@@ -1,0 +1,10 @@
+# Server Connector Configuration (Single Source of Truth)
+# Run ./install.sh or copy this file to config.yml and fill in your settings.
+
+authtoken: ""
+tunnel_domain: ""
+MCP_TOKEN: "REPLACE_WITH_A_LONG_RANDOM_SECRET"
+HOST: "127.0.0.1"
+PORT: 8765
+TUNNEL_CMD: ""
+

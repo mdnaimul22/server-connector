@@ -1,53 +1,60 @@
 # Server Connector
 
-A platform-independent, self-hostable MCP-over-HTTP server intended to connect ChatGPT-compatible MCP clients to tools on your own machine. The core is Python 3 and uses the standard library; Termux is supported but not required.
+A zero-dependency, self-hostable MCP-over-HTTP server that connects AI agents (such as ChatGPT or Claude) directly to tools and terminals on your own Linux or Android Termux machine.
 
 ## Supported environments
 
-- Ubuntu and other Debian-based Linux distributions
-- Other Linux distributions with Python 3
+- Ubuntu, Debian, Fedora, and other Linux distributions with Python 3
 - Android Termux
 
 ## Requirements
 
-- Python 3.10 or newer
-- `curl` for the launcher's health check (recommended)
-- `git` to clone or update the repository
+- Python 3.10 or newer (standard library only; zero external pip packages required)
+- `ngrok` (optional, for remote HTTPS tunnel access)
 
-## Install and run
+## Quick Start (Set & Forget)
 
 ```sh
 git clone https://github.com/mdnaimul22/server-connector.git
 cd server-connector
-chmod +x install.sh start.sh stop.sh
+chmod +x install.sh start.sh stop.sh status.sh
 ./install.sh
-./start.sh
-curl http://127.0.0.1:8765/health
 ```
 
-The installer creates `.env` and generates a unique `MCP_TOKEN` if `.env` does not exist. Keep that file private. Stop with `./stop.sh`.
+Edit `config.yml` (the single source of configuration) to set your tunnel credentials and host settings:
 
-## Live connection profile
+```yaml
+authtoken: "YOUR_NGROK_AUTHTOKEN"
+tunnel_domain: "your-domain.ngrok-free.dev"
+MCP_TOKEN: "auto-generated-by-install-or-set-your-own"
+HOST: "127.0.0.1"
+PORT: 8765
+TUNNEL_CMD: ""
+```
 
-See [`CONNECTION.md`](CONNECTION.md) for the current public endpoint, MCP URL, authentication options, health-check URL, and connection instructions. The machine-readable profile is [`connection-profile.json`](connection-profile.json). These are snapshots of the currently running Termux instance; the health endpoint is the source of live availability. Keep the repository private because the token-path endpoint is a credential.
+Then start the service:
 
-## Endpoint and configuration
+```sh
+./start.sh
+```
 
-- Health: `GET http://127.0.0.1:8765/health`
-- MCP: `POST /mcp` with `Authorization: Bearer <MCP_TOKEN>`; the legacy `/mcp/<MCP_TOKEN>` path is also accepted.
-- `HOST`: bind address; defaults to `127.0.0.1` for local-only access.
-- `PORT`: listening port; defaults to `8765`.
-- `MCP_TOKEN`: per-installation bearer secret.
-- `TUNNEL_CMD`: optional HTTPS tunnel command. Configure credentials per host; do not commit them.
+On startup, `./start.sh` (or `./status.sh` at any time) prints the live MCP Connector URL (`https://<tunnel_domain>/mcp/<MCP_TOKEN>`), alternative Bearer authentication details, and live local/remote health status directly in the terminal.
 
-For remote access, use a trusted HTTPS tunnel or reverse proxy and configure the client with the externally reachable endpoint and authentication. Do not expose the server directly to the internet: its shell and file tools have the same privileges as the operating-system user running it.
+Stop the service at any time with:
 
-## Portability
+```sh
+./stop.sh
+```
 
-The core server uses Python's standard library and has no Termux-only Python dependencies. The launcher uses portable shell and Python 3; Android wake-lock support is enabled only when available. System-information output can vary by OS.
+## Autonomous Configuration (`config.yml`)
+
+- **`authtoken`**: Your ngrok agent authtoken. The engine automatically generates a Termux/Linux-compatible runtime config (`logs/ngrok.yml`) with public DNS resolvers (`8.8.8.8`, `1.1.1.1`) so DNS resolution works seamlessly inside Android Termux as well as standard Linux.
+- **`tunnel_domain`**: Your static ngrok domain (e.g., `example.ngrok-free.dev`). If omitted, the status view auto-discovers any active dynamic ngrok URL via the local ngrok API.
+- **`MCP_TOKEN`**: Secret token used to authenticate MCP requests. Automatically generated during `./install.sh` or `./start.sh` if left blank or set to the placeholder value.
+- **`HOST` / `PORT`**: Local bind address and port (default `127.0.0.1:8765`).
+- **`TUNNEL_CMD`**: Leave empty (`""`) for automatic ngrok command generation using `authtoken`, `tunnel_domain`, `HOST`, and `PORT`. Set a custom command if using a different tunnel provider, or `"none"` to disable local tunnel launch.
 
 ## Security
 
-- `.env`, logs, backups, runtime state, and Python caches are excluded from Git.
-- Use a unique, strong token per host. Rotate any token exposed or committed to Git history.
-- Review and restrict the available tools before granting remote access; `run_command` executes arbitrary shell commands as the service account.
+- `config.yml`, runtime logs, backups, and state files are gitignored. Never commit your live `config.yml`.
+- Treat the full MCP Connector URL (`https://<domain>/mcp/<MCP_TOKEN>`) as a secret credential.
