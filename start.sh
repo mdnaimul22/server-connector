@@ -23,7 +23,7 @@ while [ "$i" -lt 15 ]; do
   if "$PYTHON" -c "import sys, engine; sys.exit(0 if engine.health().get('ok') else 1)" 2>/dev/null; then
     if [ -n "${TUNNEL_DOMAIN:-}" ] && [ -n "${TUNNEL_CMD:-}" ]; then
       j=0
-      while [ "$j" -lt 8 ]; do
+      while [ "$j" -lt 15 ]; do
         if "$PYTHON" -c "import sys, engine; sys.exit(0 if engine.check_url_health('https://${TUNNEL_DOMAIN}/health', 2).get('ok') else 1)" 2>/dev/null; then
           break
         fi
