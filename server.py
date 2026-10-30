@@ -297,6 +297,8 @@ def handle(msg):
         return None
     if method == "initialize":
         asked = (msg.get("params") or {}).get("protocolVersion")
+        client = ((msg.get("params") or {}).get("clientInfo") or {}).get("name", "unknown")
+        write_log("INFO", f"method=initialize client={client} protocol={asked}")
         result = {
             "protocolVersion": asked if asked in VERSIONS else VERSIONS[0],
             "capabilities": {"tools": {"listChanged": False}},
@@ -305,6 +307,7 @@ def handle(msg):
     elif method == "ping":
         result = {}
     elif method == "tools/list":
+        write_log("INFO", f"method=tools/list count={len(TOOLS)}")
         result = {"tools": TOOLS}
     elif method == "tools/call":
         result = call_tool(msg.get("params") or {})
