@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded decision, process supervisor, recovery, and config engine for Server Connector."""
+"""Bounded decision, process supervisor, recovery, and config engine for Doomsday Connector."""
 import json
 import os
 import platform
@@ -82,7 +82,7 @@ def ensure_ngrok_binary(verbose=False):
     if verbose:
         print(f"Downloading standalone ngrok ({arch}) into {LOCAL_NGROK} ...")
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "server-connector/2.3.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": "doomsday-connector/2.3.0"})
         with urllib.request.urlopen(req, timeout=60) as resp, tgz_path.open("wb") as out:
             shutil.copyfileobj(resp, out)
         with tarfile.open(tgz_path, "r:gz") as tar:
@@ -233,7 +233,7 @@ def init_config(verbose=False):
             CONFIG_PATH.write_text(CONFIG_EXAMPLE_PATH.read_text(encoding="utf-8"), encoding="utf-8")
         else:
             CONFIG_PATH.write_text(
-                '# Server Connector Configuration (Single Source of Truth)\n'
+                '# Doomsday Connector Configuration (Single Source of Truth)\n'
                 'authtoken: ""\n'
                 'tunnel_domain: ""\n'
                 'MCP_TOKEN: "REPLACE_WITH_A_LONG_RANDOM_SECRET"\n'
@@ -350,7 +350,7 @@ def write_json_atomic(path, obj):
 
 def check_url_health(url, timeout=3):
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "server-connector/2.3.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": "doomsday-connector/2.3.0"})
         with urllib.request.urlopen(req, timeout=timeout) as r:
             data = json.loads(r.read(4096).decode("utf-8", "replace"))
             return {
@@ -701,7 +701,7 @@ def format_status_banner(check_remote=True):
     lines = [
         "",
         "==============================================================",
-        "                 SERVER CONNECTOR LIVE STATUS                 ",
+        "                 DOOMSDAY CONNECTOR LIVE STATUS               ",
         "==============================================================",
         f"Config Source           : {CONFIG_PATH}",
         f"Structured Log          : {LOG_FILE}",

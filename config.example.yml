@@ -1,4 +1,4 @@
-# Server Connector Configuration (Single Source of Truth)
+# Doomsday Connector Configuration (Single Source of Truth)
 # Run ./install.sh or copy this file to config.yml and fill in your settings.
 
 authtoken: ""

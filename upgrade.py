@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validated, backup-first updater for the Server Connector service."""
+"""Validated, backup-first updater for the Doomsday Connector service."""
 import json
 import os
 import shutil

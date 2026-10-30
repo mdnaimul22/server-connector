@@ -1,6 +1,6 @@
-# server-connector
+# doomsday-connector
 
-Minimal MCP server over HTTP to give ChatGPT, Claude, or any remote MCP client direct shell and file access to an Android phone (Termux) or a Linux machine.
+Minimal MCP server over HTTP to give ChatGPT, Claude, Antigravity, or any remote MCP client direct shell and file access to an Android phone (Termux) or a Linux machine.
 
 Built specifically with the Python standard library only. No `pip install`, no virtualenvs, and no C-extension wheel builds that break on Termux.
 
@@ -8,13 +8,13 @@ Built specifically with the Python standard library only. No `pip install`, no v
 
 - **Stdlib only:** Runs out of the box on stock Python 3 (`http.server`, `subprocess`, `urllib`).
 - **Single config (`config.yml`):** Everything lives in one file. No `.env` quoting issues or scattered tunnel configs.
-- **Auto tunnel setup:** If `ngrok` isn't installed on the machine, `./start.sh` pulls the right static binary (`amd64` / `arm64` / `arm`) into `./bin/ngrok` and generates the runtime config with public DNS resolvers (`8.8.8.8`, `1.1.1.1`) so Termux DNS doesn't fail.
+- **Auto tunnel setup:** If `ngrok` isn't installed on the machine, `./start.sh` pulls the right static binary (`amd64` / `arm64` / `arm`) into `./bin/ngrok` and generates the runtime config with public DNS resolvers (`8.8.8.8`, `1.1.1.1`) and automatic `proot` `/etc/resolv.conf` binding on Termux so DNS never fails.
 
 ## Setup
 
 ```sh
-git clone https://github.com/mdnaimul22/server-connector.git
-cd server-connector
+git clone https://github.com/mdnaimul22/doomsday-connector.git
+cd doomsday-connector
 chmod +x *.sh
 ./install.sh
 ```
@@ -44,7 +44,7 @@ Alt MCP Endpoint (POST) : https://your-domain.ngrok-free.dev/mcp
 Alt Auth Header         : Authorization: Bearer <MCP_TOKEN>
 ```
 
-Paste the **MCP Connector URL** into ChatGPT / Claude MCP settings and you're connected.
+Paste the **MCP Connector URL** into ChatGPT, Claude, or Antigravity MCP settings and you're connected.
 
 ## Commands
 

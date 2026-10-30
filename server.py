@@ -315,7 +315,7 @@ def handle(msg):
         result = {
             "protocolVersion": asked if asked in VERSIONS else VERSIONS[0],
             "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": "server-connector", "version": "2.3.0"},
+            "serverInfo": {"name": "doomsday-connector", "version": "2.3.0"},
         }
     elif method == "ping":
         result = {}
@@ -370,7 +370,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.rstrip("/") == "/health":
-            body = json.dumps({"ok": True, "service": "server-connector", "version": "2.3.0"}).encode()
+            body = json.dumps({"ok": True, "service": "doomsday-connector", "version": "2.3.0"}).encode()
             return self.reply(200, body)
         self.reply(405, b'{"error":"method not allowed"}')
 
