@@ -370,5 +370,10 @@ class MCPHTTPServer(ThreadingHTTPServer):
 
 
 if __name__ == "__main__":
-    write_log("INFO", f"listening host={HOST} port={PORT}")
-    MCPHTTPServer((HOST, PORT), Handler).serve_forever()
+    try:
+        srv = MCPHTTPServer((HOST, PORT), Handler)
+        write_log("INFO", f"listening host={HOST} port={PORT}")
+        srv.serve_forever()
+    except Exception as e:
+        write_log("ERROR", f"startup failed host={HOST} port={PORT}: {type(e).__name__}: {e}")
+        raise

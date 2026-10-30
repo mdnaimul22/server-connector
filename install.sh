@@ -16,5 +16,5 @@ fi
 PYTHON="$(command -v python3 || command -v python)"
 mkdir -p logs
 "$PYTHON" engine.py init-config
-chmod +x start.sh stop.sh supervisor.sh install.sh status.sh
+chmod +x start.sh stop.sh install.sh status.sh
 echo "Install complete. Edit config.yml if needed, then start with: ./start.sh"

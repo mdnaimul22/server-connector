@@ -36,7 +36,7 @@ Start it:
 ./start.sh
 ```
 
-This starts the background supervisor (`server.py`, `engine.py`, and `ngrok`) and prints the live endpoints right in the terminal:
+This starts the background daemon (`engine.py`, `server.py`, and `ngrok`) and prints the live endpoints right in the terminal:
 
 ```text
 MCP Connector URL (POST): https://your-domain.ngrok-free.dev/mcp/<MCP_TOKEN>
@@ -66,9 +66,8 @@ Free ngrok accounts allow 1 static domain and 1 active agent session per account
 config.yml          local config & secrets (gitignored)
 config.example.yml  template config
 server.py           MCP JSON-RPC server & tools
-engine.py           config loader, process watchdog & health checker
+engine.py           config loader, process supervisor & health watchdog
 upgrade.py          safe atomic updater with rollback
-supervisor.sh       background process loop
 start.sh / stop.sh  service control
 status.sh           terminal status dashboard
 ```

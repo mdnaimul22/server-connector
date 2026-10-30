@@ -11,16 +11,11 @@ if [ -z "${MCP_TOKEN:-}" ] || [ "$MCP_TOKEN" = "REPLACE_WITH_A_LONG_RANDOM_SECRE
   exit 1
 fi
 mkdir -p logs
-if [ -f supervisor.pid ] && kill -0 "$(cat supervisor.pid)" 2>/dev/null; then
-  echo "Restarting running supervisor to apply current config.yml ..."
-  sh ./stop.sh >/dev/null 2>&1 || true
-  sleep 1
-fi
-rm -f supervisor.pid self_engine_state.json
+"$PYTHON" engine.py stop
 if command -v setsid >/dev/null 2>&1; then
-  nohup setsid sh ./supervisor.sh >/dev/null 2>&1 </dev/null &
+  nohup setsid "$PYTHON" engine.py daemon >/dev/null 2>&1 </dev/null &
 else
-  nohup sh ./supervisor.sh >/dev/null 2>&1 </dev/null &
+  nohup "$PYTHON" engine.py daemon >/dev/null 2>&1 </dev/null &
 fi
 echo "Supervisor start requested"
 i=0

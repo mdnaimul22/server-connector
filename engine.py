@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded decision, recovery, and autonomous config engine for Server Connector."""
+"""Bounded decision, process supervisor, recovery, and config engine for Server Connector."""
 import json
 import os
 import platform
@@ -25,6 +25,7 @@ CONFIG_EXAMPLE_PATH = ROOT / "config.example.yml"
 LOGS = ROOT / "logs"
 LOG_FILE = LOGS / "connector.log"
 STATE = ROOT / "state.json"
+PID_FILE = ROOT / "supervisor.pid"
 POLL_SECONDS = 60
 MAX_LOG_BYTES = 250_000
 
@@ -302,21 +303,102 @@ def health():
     return check_url_health(url, timeout=3)
 
 
-def processes():
+def list_all_processes():
+    rows = []
+    proc_dir = Path("/proc")
+    if proc_dir.is_dir():
+        for entry in proc_dir.iterdir():
+            if not entry.name.isdigit():
+                continue
+            pid = int(entry.name)
+            try:
+                raw = (entry / "cmdline").read_bytes()
+                if not raw:
+                    continue
+                cmd = " ".join(part.decode("utf-8", "replace") for part in raw.rstrip(b"\x00").split(b"\x00"))
+                rows.append((pid, cmd))
+            except Exception:
+                continue
+        if rows:
+            return rows
     try:
-        p = subprocess.run(
-            [
-                "sh",
-                "-c",
-                "ps -A -o pid,args | grep -E 'python3? .*server\\.py|python3? server\\.py|supervisor\\.sh|ngrok http' | grep -v grep",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        return p.stdout.splitlines()[:12]
-    except Exception as e:
-        return ["process inspection failed: " + str(e)[:120]]
+        p = subprocess.run(["ps", "-A", "-o", "pid,args"], capture_output=True, text=True, timeout=5)
+        for line in p.stdout.splitlines()[1:]:
+            parts = line.strip().split(None, 1)
+            if len(parts) == 2 and parts[0].isdigit():
+                rows.append((int(parts[0]), parts[1]))
+    except Exception:
+        pass
+    return rows
+
+
+def find_connector_pids():
+    my_pid = os.getpid()
+    port = get_effective_settings()["PORT"]
+    supervisors = []
+    workers = []
+    for pid, cmd in list_all_processes():
+        if pid == my_pid:
+            continue
+        if any(p in cmd for p in ("supervisor.sh", "engine.py daemon", "self_engine.py daemon")):
+            supervisors.append((pid, cmd))
+        elif re.search(r"(^|[\s/])python3?\s+.*server\.py\b", cmd):
+            workers.append((pid, cmd))
+        elif "ngrok" in cmd and ("ngrok.yml" in cmd or f":{port}" in cmd or f" {port}" in cmd):
+            workers.append((pid, cmd))
+    return supervisors, workers
+
+
+def stop_all_processes():
+    if PID_FILE.is_file():
+        try:
+            sup_pid = int(PID_FILE.read_text().strip())
+            os.kill(sup_pid, signal.SIGTERM)
+        except Exception:
+            pass
+    supervisors, workers = find_connector_pids()
+    for pid, _ in supervisors:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    time.sleep(0.3)
+    _, workers = find_connector_pids()
+    all_targets = [pid for pid, _ in supervisors] + [pid for pid, _ in workers]
+    for pid in all_targets:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        s_rem, w_rem = find_connector_pids()
+        if not s_rem and not w_rem:
+            break
+        time.sleep(0.2)
+
+    s_rem, w_rem = find_connector_pids()
+    for pid, _ in s_rem + w_rem:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+    PID_FILE.unlink(missing_ok=True)
+    (ROOT / "self_engine_state.json").unlink(missing_ok=True)
+    if all_targets:
+        write_log("INFO", "SUPERVISOR", f"stopped pids={sorted(set(all_targets))}")
+
+
+def processes():
+    supervisors, workers = find_connector_pids()
+    my_pid = os.getpid()
+    out = []
+    for pid, cmd in supervisors + workers:
+        if pid != my_pid:
+            out.append(f"{pid} {cmd}")
+    return out[:12]
 
 
 def tail(path, limit=12000):
@@ -403,54 +485,100 @@ def decide(log_always=False):
     }
 
 
-def recover_server_if_needed(report):
-    state = {}
-    if STATE.exists():
-        try:
-            state = json.loads(STATE.read_text())
-        except Exception:
-            state = {}
-    if report.get("health", {}).get("ok"):
-        state["unhealthy_checks"] = 0
-        write_json_atomic(STATE, state)
-        return
-    failures = int(state.get("unhealthy_checks", 0)) + 1
-    state["unhealthy_checks"] = failures
-    write_json_atomic(STATE, state)
-    if failures < 2:
-        write_log("WARN", "ENGINE", "decision=RECOVERY_DEFERRED reason='first failed local health check'")
-        return
-    proc = subprocess.run(
-        ["sh", "-c", "ps -A -o pid,args | awk '($2 ~ /(^|\\/)python3?$/ && $3 == \"server.py\") {print $1}'"],
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    pids = [int(x) for x in proc.stdout.split() if x.isdigit() and int(x) != os.getpid()]
-    if not pids:
-        write_log("WARN", "ENGINE", "decision=RECOVERY_DEFERRED reason='no server PID found'")
-        return
-    for pid in pids:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-    write_log("WARN", "ENGINE", f"decision=SERVER_RESTART_REQUESTED pids={pids}")
-    state["unhealthy_checks"] = 0
-    write_json_atomic(STATE, state)
-
-
 def daemon():
-    write_log("INFO", "ENGINE", f"monitor daemon started interval={POLL_SECONDS}s")
-    first = True
-    while True:
+    init_config(verbose=False)
+    s = get_effective_settings()
+    PID_FILE.write_text(f"{os.getpid()}\n", encoding="utf-8")
+    write_log(
+        "INFO",
+        "SUPERVISOR",
+        f"started pid={os.getpid()} host={s['HOST']} port={s['PORT']} domain={s['TUNNEL_DOMAIN'] or 'none'}",
+    )
+    if s["TUNNEL_DOMAIN"]:
+        write_log("INFO", "TUNNEL", f"endpoint=https://{s['TUNNEL_DOMAIN']}/mcp/{s['MCP_TOKEN']}")
+
+    server_proc = None
+    tunnel_proc = None
+    stopping = False
+
+    def terminate_child(proc):
+        if proc is None or proc.poll() is not None:
+            return
         try:
-            report = decide(log_always=first)
-            first = False
-            recover_server_if_needed(report)
-        except Exception as e:
-            write_log("ERROR", "ENGINE", f"exception={type(e).__name__}: {str(e)[:200]}")
-        time.sleep(POLL_SECONDS)
+            proc.terminate()
+            proc.wait(timeout=2)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    def handle_sig(signum, frame):
+        nonlocal stopping
+        stopping = True
+        terminate_child(tunnel_proc)
+        terminate_child(server_proc)
+        PID_FILE.unlink(missing_ok=True)
+        write_log("INFO", "SUPERVISOR", f"stopped pid={os.getpid()}")
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, handle_sig)
+    signal.signal(signal.SIGINT, handle_sig)
+
+    tunnel_args = None
+    if s["TUNNEL_CMD"]:
+        parsed = shlex.split(s["TUNNEL_CMD"])
+        if parsed and (shutil.which(parsed[0]) or Path(parsed[0]).is_file()):
+            tunnel_args = parsed
+        else:
+            write_log("WARN", "TUNNEL", f"binary '{parsed[0] if parsed else ''}' not found; skipping local tunnel")
+
+    last_health_check = 0.0
+    unhealthy_streak = 0
+    first_check = True
+
+    while not stopping:
+        if server_proc is None or server_proc.poll() is not None:
+            if server_proc is not None:
+                write_log("WARN", "SUPERVISOR", f"service=server exited rc={server_proc.returncode}; restarting")
+            server_proc = subprocess.Popen(
+                [sys.executable, str(ROOT / "server.py")],
+                cwd=str(ROOT),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        if tunnel_args is not None and (tunnel_proc is None or tunnel_proc.poll() is not None):
+            if tunnel_proc is not None:
+                write_log("WARN", "SUPERVISOR", f"service=tunnel exited rc={tunnel_proc.returncode}; restarting")
+            tunnel_proc = subprocess.Popen(
+                tunnel_args,
+                cwd=str(ROOT),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        now_ts = time.time()
+        if now_ts - last_health_check >= POLL_SECONDS or (first_check and now_ts - last_health_check >= 2.0):
+            last_health_check = now_ts
+            try:
+                report = decide(log_always=first_check)
+                first_check = False
+                if report.get("health", {}).get("ok"):
+                    unhealthy_streak = 0
+                else:
+                    unhealthy_streak += 1
+                    if unhealthy_streak >= 2 and server_proc is not None:
+                        write_log("WARN", "ENGINE", f"decision=SERVER_RESTART_REQUESTED pid={server_proc.pid}")
+                        terminate_child(server_proc)
+                        server_proc = None
+                        unhealthy_streak = 0
+            except Exception as e:
+                write_log("ERROR", "ENGINE", f"exception={type(e).__name__}: {str(e)[:200]}")
+
+        time.sleep(2)
 
 
 def print_env():
@@ -526,6 +654,9 @@ def main():
     if mode == "daemon":
         daemon()
         return 0
+    if mode == "stop":
+        stop_all_processes()
+        return 0
     if mode == "init-config":
         init_config(verbose=True)
         return 0
@@ -542,7 +673,7 @@ def main():
         if msg:
             write_log(lvl, comp, msg)
         return 0
-    print("usage: engine.py check|daemon|init-config|env|status|log")
+    print("usage: engine.py check|daemon|stop|init-config|env|status|log")
     return 2
 
 
