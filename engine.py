@@ -21,12 +21,14 @@ ROOT = Path(__file__).resolve().parent
 BIN_DIR = ROOT / "bin"
 LOCAL_NGROK = BIN_DIR / "ngrok"
 NGROK_RUNTIME_YML = BIN_DIR / "ngrok.yml"
-CONFIG_PATH = ROOT / "config.yml"
-CONFIG_EXAMPLE_PATH = ROOT / "config.example.yml"
-LOGS = ROOT / "logs"
+NGROK_LOG_FILE = LOGS = ROOT / "logs"
 LOG_FILE = LOGS / "connector.log"
+TUNNEL_DIAG_FILE = BIN_DIR / "ngrok.last.log"
 STATE = ROOT / "state.json"
 PID_FILE = ROOT / "supervisor.pid"
+CONFIG_PATH = ROOT / "config.yml"
+CONFIG_EXAMPLE_PATH = ROOT / "config.example.yml"
+TERMUX_RESOLV = Path("/data/data/com.termux/files/usr/etc/resolv.conf")
 POLL_SECONDS = 60
 MAX_LOG_BYTES = 250_000
 
@@ -53,6 +55,9 @@ def find_ngrok_bin():
     sys_ngrok = shutil.which("ngrok")
     if sys_ngrok:
         return sys_ngrok
+    home_ngrok = Path.home() / "ngrok" / "ngrok"
+    if home_ngrok.is_file() and os.access(home_ngrok, os.X_OK):
+        return str(home_ngrok)
     if LOCAL_NGROK.is_file() and os.access(LOCAL_NGROK, os.X_OK):
         return str(LOCAL_NGROK)
     return ""
@@ -234,13 +239,17 @@ def resolve_tunnel_cmd(cfg):
     ngrok_cfg = str(NGROK_RUNTIME_YML)
     ngrok_bin = find_ngrok_bin() or "ngrok"
 
+    proot_prefix = ""
+    if TERMUX_RESOLV.is_file() and shutil.which("proot"):
+        proot_prefix = f"proot -b {TERMUX_RESOLV}:/etc/resolv.conf "
+
     if not raw_cmd or raw_cmd.lower() == "auto":
         if not authtoken:
             return ""
-        cmd = f'"{ngrok_bin}" http --config "{ngrok_cfg}"'
+        cmd = f'{proot_prefix}"{ngrok_bin}" http --config "{ngrok_cfg}"'
         if domain:
-            cmd += f' --domain="{domain}"'
-        cmd += f" {host}:{port}"
+            cmd += f' --url="{domain}"'
+        cmd += f" {host}:{port} --log=stdout --log-format=logfmt"
         return cmd
 
     cmd = (
@@ -255,8 +264,10 @@ def resolve_tunnel_cmd(cfg):
         if "--config" not in cmd and authtoken:
             extra += f' --config "{ngrok_cfg}"'
         if domain and not any(f in cmd for f in ("--domain", "--url", "--hostname")):
-            extra += f' --domain="{domain}"'
-        cmd = re.sub(r"^ngrok(\s+http)\b", f'"{ngrok_bin}"\\1' + extra, cmd, count=1)
+            extra += f' --url="{domain}"'
+        if "--log=" not in cmd:
+            extra += " --log=stdout --log-format=logfmt"
+        cmd = re.sub(r"^ngrok(\s+http)\b", f'{proot_prefix}"{ngrok_bin}"\\1' + extra, cmd, count=1)
     return cmd
 
 
@@ -570,14 +581,14 @@ def daemon():
             if tunnel_proc is not None:
                 err_out = ""
                 try:
-                    if tunnel_err_file:
-                        tunnel_err_file.seek(0)
+                    if TUNNEL_DIAG_FILE.is_file():
                         lines = [
                             ln.strip()
-                            for ln in tunnel_err_file.read().splitlines()
-                            if ln.strip() and "deprecated" not in ln.lower()
+                            for ln in TUNNEL_DIAG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
+                            if ln.strip() and ("lvl=eror" in ln or "ERROR" in ln or "err=" in ln) and "err=<nil>" not in ln
                         ]
                         err_out = lines[-1] if lines else ""
+                    if tunnel_err_file:
                         tunnel_err_file.close()
                 except Exception:
                     pass
@@ -586,7 +597,8 @@ def daemon():
                     "SUPERVISOR",
                     f"service=tunnel exited rc={tunnel_proc.returncode} err={err_out!r}; restarting",
                 )
-            tunnel_err_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+            BIN_DIR.mkdir(exist_ok=True)
+            tunnel_err_file = TUNNEL_DIAG_FILE.open("w+", encoding="utf-8")
             tunnel_proc = subprocess.Popen(
                 tunnel_args,
                 cwd=str(ROOT),
@@ -677,6 +689,14 @@ def format_status_banner(check_remote=True):
             lines.append(f"[Remote Tunnel] ONLINE      (https://{domain}/health)")
         else:
             lines.append(f"[Remote Tunnel] UNREACHABLE ({rh.get('error', 'check tunnel process')})")
+            if TUNNEL_DIAG_FILE.is_file():
+                diag = [
+                    ln.strip()
+                    for ln in TUNNEL_DIAG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
+                    if ("lvl=eror" in ln or "ERROR" in ln or "err=" in ln) and "err=<nil>" not in ln and "hardware address" not in ln
+                ]
+                if diag:
+                    lines.append(f"[Tunnel Error ] {diag[-1][-160:]}")
     lines.append("==============================================================")
     return "\n".join(lines)
 
