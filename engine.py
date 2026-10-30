@@ -168,9 +168,62 @@ def sync_ngrok_yml(authtoken):
         pass
 
 
+def ensure_getent_shim():
+    if shutil.which("getent"):
+        return
+    BIN_DIR.mkdir(exist_ok=True)
+    shim = BIN_DIR / "getent"
+    script = (
+        f"#!{sys.executable}\n"
+        "import socket, sys\n"
+        "args = sys.argv[1:]\n"
+        "if not args:\n"
+        "    sys.exit(1)\n"
+        "db, keys = args[0], args[1:]\n"
+        "if db in ('hosts', 'ahosts', 'ahostsv4', 'ahostsv6'):\n"
+        "    if not keys:\n"
+        "        sys.exit(0)\n"
+        "    fam = socket.AF_INET if db == 'ahostsv4' else (socket.AF_INET6 if db == 'ahostsv6' else 0)\n"
+        "    ok = False\n"
+        "    for k in keys:\n"
+        "        try:\n"
+        "            infos = socket.getaddrinfo(k, None, fam, socket.SOCK_STREAM)\n"
+        "            seen = []\n"
+        "            for info in infos:\n"
+        "                ip = info[4][0]\n"
+        "                if ip not in seen:\n"
+        "                    seen.append(ip)\n"
+        "            for ip in seen:\n"
+        "                if db == 'hosts':\n"
+        "                    print(f'{ip:<15} {k}')\n"
+        "                else:\n"
+        "                    print(f'{ip:<15} STREAM {k}')\n"
+        "                    print(f'{ip:<15} DGRAM  ')\n"
+        "                    print(f'{ip:<15} RAW    ')\n"
+        "            if seen:\n"
+        "                ok = True\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "    sys.exit(0 if ok else 2)\n"
+        "if db == 'passwd':\n"
+        "    import pwd\n"
+        "    entries = [pwd.getpwnam(k) if not k.isdigit() else pwd.getpwuid(int(k)) for k in keys] if keys else pwd.getpwall()\n"
+        "    for e in entries:\n"
+        "        print(f'{e.pw_name}:x:{e.pw_uid}:{e.pw_gid}:{e.pw_gecos}:{e.pw_dir}:{e.pw_shell}')\n"
+        "    sys.exit(0)\n"
+        "sys.exit(2)\n"
+    )
+    shim.write_text(script, encoding="utf-8")
+    try:
+        os.chmod(shim, 0o755)
+    except OSError:
+        pass
+
+
 def init_config(verbose=False):
     LOGS.mkdir(exist_ok=True)
     BIN_DIR.mkdir(exist_ok=True)
+    ensure_getent_shim()
     (ROOT / "self_engine_state.json").unlink(missing_ok=True)
     (LOGS / "ngrok.yml").unlink(missing_ok=True)
 

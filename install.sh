@@ -2,7 +2,7 @@
 set -eu
 cd "$(dirname "$0")"
 if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
-  if command -v pkg >/dev/null 2>&1; then pkg install -y python curl proot
+  if command -v pkg >/dev/null 2>&1; then pkg install -y python curl proot dnsutils
   elif command -v apt-get >/dev/null 2>&1; then
     if [ "$(id -u)" -eq 0 ]; then apt-get update && apt-get install -y python3 curl
     elif command -v sudo >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y python3 curl
@@ -14,8 +14,14 @@ if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; 
   else echo "Install Python 3 and curl with your package manager." >&2; exit 1; fi
 fi
 PYTHON="$(command -v python3 || command -v python)"
-if command -v pkg >/dev/null 2>&1 && ! command -v proot >/dev/null 2>&1; then
-  pkg install -y proot
+if command -v pkg >/dev/null 2>&1; then
+  for pkg_item in proot:proot dig:dnsutils; do
+    bin_name="${pkg_item%%:*}"
+    pkg_name="${pkg_item#*:}"
+    if ! command -v "$bin_name" >/dev/null 2>&1; then
+      pkg install -y "$pkg_name" || true
+    fi
+  done
 fi
 mkdir -p logs
 "$PYTHON" engine.py init-config

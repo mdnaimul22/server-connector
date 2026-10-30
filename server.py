@@ -102,6 +102,19 @@ def clip(s, tail=False):
     return s[:LIMIT] + f"\n[truncated {len(s) - LIMIT} chars]"
 
 
+def build_cmd_env():
+    env = os.environ.copy()
+    extra = [str(ROOT / "bin"), str(Path.home() / "bin")]
+    termux_bin = "/data/data/com.termux/files/usr/bin"
+    if os.path.isdir(termux_bin):
+        extra.append(termux_bin)
+    cur_path = env.get("PATH", "")
+    parts = [p for p in extra if p and p not in cur_path.split(":")]
+    if parts:
+        env["PATH"] = ":".join(parts + ([cur_path] if cur_path else []))
+    return env
+
+
 def sh(command, timeout=60, cwd="~"):
     if not isinstance(command, str) or not command.strip():
         raise ValueError("command must be a non-empty string")
@@ -111,7 +124,7 @@ def sh(command, timeout=60, cwd="~"):
         raise ValueError(f"cwd is not a directory: {workdir}")
     p = subprocess.Popen(
         command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        cwd=str(workdir), start_new_session=True,
+        cwd=str(workdir), env=build_cmd_env(), start_new_session=True,
     )
     try:
         out, err = p.communicate(timeout=timeout)
@@ -141,7 +154,7 @@ def start_job(command, cwd="~"):
         f"echo $? > {d}/exit; echo $(( $(date +%s) - start )) > {d}/secs"
     )
     p = subprocess.Popen(
-        ["sh", "-c", wrapper], cwd=str(workdir), start_new_session=True,
+        ["sh", "-c", wrapper], cwd=str(workdir), env=build_cmd_env(), start_new_session=True,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     (d / "pid").write_text(str(p.pid))
