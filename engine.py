@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import urllib.request
 from datetime import datetime
@@ -238,7 +239,7 @@ def resolve_tunnel_cmd(cfg):
             return ""
         cmd = f'"{ngrok_bin}" http --config "{ngrok_cfg}"'
         if domain:
-            cmd += f' --url="https://{domain}"'
+            cmd += f' --domain="{domain}"'
         cmd += f" {host}:{port}"
         return cmd
 
@@ -254,7 +255,7 @@ def resolve_tunnel_cmd(cfg):
         if "--config" not in cmd and authtoken:
             extra += f' --config "{ngrok_cfg}"'
         if domain and not any(f in cmd for f in ("--domain", "--url", "--hostname")):
-            extra += f' --url="https://{domain}"'
+            extra += f' --domain="{domain}"'
         cmd = re.sub(r"^ngrok(\s+http)\b", f'"{ngrok_bin}"\\1' + extra, cmd, count=1)
     return cmd
 
@@ -498,7 +499,9 @@ def daemon():
         write_log("INFO", "TUNNEL", f"endpoint=https://{s['TUNNEL_DOMAIN']}/mcp/{s['MCP_TOKEN']}")
 
     server_proc = None
+    server_err_file = None
     tunnel_proc = None
+    tunnel_err_file = None
     stopping = False
 
     def terminate_child(proc):
@@ -540,24 +543,56 @@ def daemon():
     while not stopping:
         if server_proc is None or server_proc.poll() is not None:
             if server_proc is not None:
-                write_log("WARN", "SUPERVISOR", f"service=server exited rc={server_proc.returncode}; restarting")
+                err_out = ""
+                try:
+                    if server_err_file:
+                        server_err_file.seek(0)
+                        lines = [ln.strip() for ln in server_err_file.read().splitlines() if ln.strip()]
+                        err_out = lines[-1] if lines else ""
+                        server_err_file.close()
+                except Exception:
+                    pass
+                write_log(
+                    "WARN",
+                    "SUPERVISOR",
+                    f"service=server exited rc={server_proc.returncode} err={err_out!r}; restarting",
+                )
+            server_err_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
             server_proc = subprocess.Popen(
                 [sys.executable, str(ROOT / "server.py")],
                 cwd=str(ROOT),
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=server_err_file,
+                stderr=server_err_file,
             )
 
         if tunnel_args is not None and (tunnel_proc is None or tunnel_proc.poll() is not None):
             if tunnel_proc is not None:
-                write_log("WARN", "SUPERVISOR", f"service=tunnel exited rc={tunnel_proc.returncode}; restarting")
+                err_out = ""
+                try:
+                    if tunnel_err_file:
+                        tunnel_err_file.seek(0)
+                        lines = [
+                            ln.strip()
+                            for ln in tunnel_err_file.read().splitlines()
+                            if ln.strip() and "deprecated" not in ln.lower()
+                        ]
+                        err_out = lines[-1] if lines else ""
+                        tunnel_err_file.close()
+                except Exception:
+                    pass
+                write_log(
+                    "WARN",
+                    "SUPERVISOR",
+                    f"service=tunnel exited rc={tunnel_proc.returncode} err={err_out!r}; restarting",
+                )
+            tunnel_err_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
             tunnel_proc = subprocess.Popen(
                 tunnel_args,
                 cwd=str(ROOT),
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=tunnel_err_file,
+                stderr=tunnel_err_file,
             )
 
         now_ts = time.time()
