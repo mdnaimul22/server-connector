@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parent
 LIVE = ROOT / "server.py"
 CANDIDATE = ROOT / "server.py.candidate"
 BACKUPS = ROOT / "backups"
-LOG = ROOT / "logs" / "upgrade.log"
+LOG = ROOT / "logs" / "connector.log"
 
 
 def load_port():
@@ -36,10 +36,11 @@ def load_port():
 HEALTH = "http://127.0.0.1:" + load_port() + "/health"
 
 
-def log(message):
-    stamp = datetime.now().isoformat(timespec="seconds")
-    with LOG.open("a") as f:
-        f.write(f"[{stamp}] {message}\n")
+def log(message, level="INFO"):
+    LOG.parent.mkdir(exist_ok=True)
+    stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    with LOG.open("a", encoding="utf-8") as f:
+        f.write(f"{stamp} [{level:<5}] [UPGRADE   ] {message}\n")
 
 
 def compile_check(path):

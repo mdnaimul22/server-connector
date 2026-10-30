@@ -19,13 +19,32 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 BIN_DIR = ROOT / "bin"
 LOCAL_NGROK = BIN_DIR / "ngrok"
+NGROK_RUNTIME_YML = BIN_DIR / "ngrok.yml"
 CONFIG_PATH = ROOT / "config.yml"
 CONFIG_EXAMPLE_PATH = ROOT / "config.example.yml"
 LOGS = ROOT / "logs"
-NGROK_RUNTIME_YML = LOGS / "ngrok.yml"
+LOG_FILE = LOGS / "connector.log"
 STATE = ROOT / "state.json"
-DECISIONS = LOGS / "decisions.jsonl"
 POLL_SECONDS = 60
+MAX_LOG_BYTES = 250_000
+
+
+def now():
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def write_log(level, component, message):
+    LOGS.mkdir(exist_ok=True)
+    try:
+        if LOG_FILE.exists() and LOG_FILE.stat().st_size > MAX_LOG_BYTES:
+            data = LOG_FILE.read_bytes()[-int(MAX_LOG_BYTES * 0.7):]
+            nl = data.find(b"\n")
+            LOG_FILE.write_bytes(data[nl + 1:] if nl != -1 else data)
+    except Exception:
+        pass
+    line = f"{now()} [{level:<5}] [{component:<10}] {message}\n"
+    with LOG_FILE.open("a", encoding="utf-8") as f:
+        f.write(line)
 
 
 def find_ngrok_bin():
@@ -67,11 +86,13 @@ def ensure_ngrok_binary(verbose=False):
                 shutil.copyfileobj(src, dst)
         os.chmod(LOCAL_NGROK, 0o755)
         tgz_path.unlink(missing_ok=True)
+        write_log("INFO", "INSTALL", f"installed standalone ngrok ({arch}) -> {LOCAL_NGROK}")
         if verbose:
             print("ngrok binary installed successfully.")
         return str(LOCAL_NGROK)
     except Exception as e:
         tgz_path.unlink(missing_ok=True)
+        write_log("WARN", "INSTALL", f"automatic ngrok download failed: {e}")
         if verbose:
             print(f"WARNING: automatic ngrok download failed: {e}", file=sys.stderr)
         return ""
@@ -122,7 +143,7 @@ def discover_ngrok_domain():
 
 
 def sync_ngrok_yml(authtoken):
-    LOGS.mkdir(exist_ok=True)
+    BIN_DIR.mkdir(exist_ok=True)
     if not authtoken:
         return
     content = (
@@ -142,6 +163,10 @@ def sync_ngrok_yml(authtoken):
 
 def init_config(verbose=False):
     LOGS.mkdir(exist_ok=True)
+    BIN_DIR.mkdir(exist_ok=True)
+    (ROOT / "self_engine_state.json").unlink(missing_ok=True)
+    (LOGS / "ngrok.yml").unlink(missing_ok=True)
+
     created = False
     if not CONFIG_PATH.is_file():
         if CONFIG_EXAMPLE_PATH.is_file():
@@ -212,7 +237,7 @@ def resolve_tunnel_cmd(cfg):
             return ""
         cmd = f'"{ngrok_bin}" http --config "{ngrok_cfg}"'
         if domain:
-            cmd += f' --domain="{domain}"'
+            cmd += f' --url="https://{domain}"'
         cmd += f" {host}:{port}"
         return cmd
 
@@ -228,7 +253,7 @@ def resolve_tunnel_cmd(cfg):
         if "--config" not in cmd and authtoken:
             extra += f' --config "{ngrok_cfg}"'
         if domain and not any(f in cmd for f in ("--domain", "--url", "--hostname")):
-            extra += f' --domain="{domain}"'
+            extra += f' --url="https://{domain}"'
         cmd = re.sub(r"^ngrok(\s+http)\b", f'"{ngrok_bin}"\\1' + extra, cmd, count=1)
     return cmd
 
@@ -251,21 +276,10 @@ def get_effective_settings():
     }
 
 
-def now():
-    return datetime.now().astimezone().isoformat(timespec="seconds")
-
-
 def write_json_atomic(path, obj):
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(obj, indent=2, ensure_ascii=False) + "\n")
     os.replace(tmp, path)
-
-
-def record(event):
-    LOGS.mkdir(exist_ok=True)
-    event["time"] = now()
-    with DECISIONS.open("a") as f:
-        f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
 def check_url_health(url, timeout=3):
@@ -316,11 +330,11 @@ def tail(path, limit=12000):
         return ""
 
 
-def decide():
+def decide(log_always=False):
+    (ROOT / "self_engine_state.json").unlink(missing_ok=True)
     h = health()
     proc = processes()
-    server_log = tail(LOGS / "server.log")
-    upgrade_log = tail(LOGS / "upgrade.log")
+    connector_log = tail(LOG_FILE)
     state = {}
     if STATE.exists():
         try:
@@ -328,9 +342,9 @@ def decide():
         except Exception:
             state = {}
     errors = {
-        "address_in_use": server_log.count("Address already in use"),
-        "tracebacks": server_log.count("Traceback (most recent call last):"),
-        "upgrade_errors": upgrade_log.count("ERROR:"),
+        "address_in_use": connector_log.count("Address already in use"),
+        "tracebacks": connector_log.count("Traceback (most recent call last):"),
+        "upgrade_errors": connector_log.count("[UPGRADE   ] ERROR:"),
     }
     candidate = ROOT / "server.py.candidate"
     actions = []
@@ -358,15 +372,8 @@ def decide():
             "reason": "health is good and no staged upgrade exists",
         })
         decision = "HEALTHY_NO_CHANGE"
-    report = {
-        "decision": decision,
-        "health": h,
-        "errors": errors,
-        "processes": proc,
-        "actions": actions,
-        "candidate_present": candidate.exists(),
-        "policy": "bounded_actions; no arbitrary self-modification; backups and validation required",
-    }
+
+    prev_decision = state.get("last_decision")
     state.update({
         "last_check": now(),
         "last_decision": decision,
@@ -375,8 +382,25 @@ def decide():
         "upgrade_errors": errors["upgrade_errors"],
     })
     write_json_atomic(STATE, state)
-    record(report)
-    return report
+
+    if log_always or decision != prev_decision or decision != "HEALTHY_NO_CHANGE":
+        lvl = "INFO" if h["ok"] else "WARN"
+        write_log(
+            lvl,
+            "ENGINE",
+            f"decision={decision} health_ok={h['ok']} tracebacks={errors['tracebacks']} addr_in_use={errors['address_in_use']}",
+        )
+
+    return {
+        "decision": decision,
+        "health": h,
+        "errors": errors,
+        "processes": proc,
+        "actions": actions,
+        "candidate_present": candidate.exists(),
+        "policy": "bounded_actions; no arbitrary self-modification; backups and validation required",
+        "time": now(),
+    }
 
 
 def recover_server_if_needed(report):
@@ -394,7 +418,7 @@ def recover_server_if_needed(report):
     state["unhealthy_checks"] = failures
     write_json_atomic(STATE, state)
     if failures < 2:
-        record({"decision": "RECOVERY_DEFERRED", "reason": "first failed local health check; recheck before restart"})
+        write_log("WARN", "ENGINE", "decision=RECOVERY_DEFERRED reason='first failed local health check'")
         return
     proc = subprocess.run(
         ["sh", "-c", "ps -A -o pid,args | awk '($2 ~ /(^|\\/)python3?$/ && $3 == \"server.py\") {print $1}'"],
@@ -404,31 +428,28 @@ def recover_server_if_needed(report):
     )
     pids = [int(x) for x in proc.stdout.split() if x.isdigit() and int(x) != os.getpid()]
     if not pids:
-        record({"decision": "RECOVERY_DEFERRED", "reason": "no server PID found; supervisor should relaunch it"})
+        write_log("WARN", "ENGINE", "decision=RECOVERY_DEFERRED reason='no server PID found'")
         return
     for pid in pids:
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
-    record({
-        "decision": "SERVER_RESTART_REQUESTED",
-        "pids": pids,
-        "reason": "two consecutive local health failures; supervisor will relaunch server",
-    })
+    write_log("WARN", "ENGINE", f"decision=SERVER_RESTART_REQUESTED pids={pids}")
     state["unhealthy_checks"] = 0
     write_json_atomic(STATE, state)
 
 
 def daemon():
-    LOGS.mkdir(exist_ok=True)
-    record({"decision": "ENGINE_STARTED", "actions": [{"action": "monitor", "interval_seconds": POLL_SECONDS}]})
+    write_log("INFO", "ENGINE", f"monitor daemon started interval={POLL_SECONDS}s")
+    first = True
     while True:
         try:
-            report = decide()
+            report = decide(log_always=first)
+            first = False
             recover_server_if_needed(report)
         except Exception as e:
-            record({"decision": "ENGINE_EXCEPTION", "error": type(e).__name__ + ": " + str(e)[:200]})
+            write_log("ERROR", "ENGINE", f"exception={type(e).__name__}: {str(e)[:200]}")
         time.sleep(POLL_SECONDS)
 
 
@@ -455,6 +476,7 @@ def format_status_banner(check_remote=True):
         "                 SERVER CONNECTOR LIVE STATUS                 ",
         "==============================================================",
         f"Config Source           : {CONFIG_PATH}",
+        f"Structured Log          : {LOG_FILE}",
         f"Local Health URL (GET)  : {local_health_url}",
         f"Local MCP URL (POST)    : {local_mcp_url}/{token}",
     ]
@@ -499,7 +521,7 @@ def format_status_banner(check_remote=True):
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "check"
     if mode == "check":
-        print(json.dumps(decide(), indent=2, ensure_ascii=False))
+        print(json.dumps(decide(log_always=False), indent=2, ensure_ascii=False))
         return 0
     if mode == "daemon":
         daemon()
@@ -513,7 +535,14 @@ def main():
     if mode == "status":
         print(format_status_banner(check_remote=True))
         return 0
-    print("usage: engine.py check|daemon|init-config|env|status")
+    if mode == "log":
+        lvl = sys.argv[2] if len(sys.argv) > 2 else "INFO"
+        comp = sys.argv[3] if len(sys.argv) > 3 else "SUPERVISOR"
+        msg = " ".join(sys.argv[4:]) if len(sys.argv) > 4 else ""
+        if msg:
+            write_log(lvl, comp, msg)
+        return 0
+    print("usage: engine.py check|daemon|init-config|env|status|log")
     return 2
 
 

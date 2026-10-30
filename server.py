@@ -7,8 +7,23 @@ import tempfile
 import time
 import uuid
 import re
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+LOG_FILE = ROOT / "logs" / "connector.log"
+
+
+def write_log(level, message):
+    try:
+        LOG_FILE.parent.mkdir(exist_ok=True)
+        stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+        with LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(f"{stamp} [{level:<5}] [SERVER    ] {message}\n")
+    except Exception:
+        pass
+
 
 def load_config():
     cfg = {}
@@ -261,13 +276,17 @@ FUNCS = {f.__name__: f for f in (
 
 
 def call_tool(params):
-    fn = FUNCS.get(params.get("name"))
+    name = params.get("name")
+    fn = FUNCS.get(name)
     if fn is None:
+        write_log("WARN", f"tool={name} error='unknown tool'")
         return {"content": [{"type": "text", "text": "unknown tool"}], "isError": True}
     try:
         text, err = fn(**(params.get("arguments") or {}))
+        write_log("WARN" if err else "INFO", f"tool={name} status={'error' if err else 'ok'}")
     except Exception as e:
         text, err = f"{type(e).__name__}: {e}", True
+        write_log("ERROR", f"tool={name} exception={type(e).__name__}: {e}")
     return {"content": [{"type": "text", "text": text}], "isError": err}
 
 
@@ -348,4 +367,5 @@ class MCPHTTPServer(ThreadingHTTPServer):
 
 
 if __name__ == "__main__":
+    write_log("INFO", f"listening host={HOST} port={PORT}")
     MCPHTTPServer((HOST, PORT), Handler).serve_forever()

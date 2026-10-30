@@ -16,11 +16,11 @@ if [ -f supervisor.pid ] && kill -0 "$(cat supervisor.pid)" 2>/dev/null; then
   sh ./stop.sh >/dev/null 2>&1 || true
   sleep 1
 fi
-rm -f supervisor.pid
+rm -f supervisor.pid self_engine_state.json
 if command -v setsid >/dev/null 2>&1; then
-  nohup setsid sh ./supervisor.sh >> logs/supervisor-launch.log 2>&1 </dev/null &
+  nohup setsid sh ./supervisor.sh >/dev/null 2>&1 </dev/null &
 else
-  nohup sh ./supervisor.sh >> logs/supervisor-launch.log 2>&1 </dev/null &
+  nohup sh ./supervisor.sh >/dev/null 2>&1 </dev/null &
 fi
 echo "Supervisor start requested"
 i=0
@@ -43,5 +43,5 @@ while [ "$i" -lt 15 ]; do
   i=$((i + 1))
 done
 echo "ERROR: server health did not recover within 15 seconds" >&2
-tail -30 logs/supervisor.log logs/server.log 2>/dev/null || true
+tail -30 logs/connector.log 2>/dev/null || true
 exit 1
