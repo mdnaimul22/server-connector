@@ -14,12 +14,14 @@ import tarfile
 import tempfile
 import time
 import urllib.request
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+IS_WIN = os.name == "nt"
 BIN_DIR = ROOT / "bin"
-LOCAL_NGROK = BIN_DIR / "ngrok"
+LOCAL_NGROK = BIN_DIR / ("ngrok.exe" if IS_WIN else "ngrok")
 NGROK_RUNTIME_YML = BIN_DIR / "ngrok.yml"
 NGROK_LOG_FILE = LOGS = ROOT / "logs"
 LOG_FILE = LOGS / "connector.log"
@@ -55,7 +57,7 @@ def find_ngrok_bin():
     sys_ngrok = shutil.which("ngrok")
     if sys_ngrok:
         return sys_ngrok
-    home_ngrok = Path.home() / "ngrok" / "ngrok"
+    home_ngrok = Path.home() / "ngrok" / ("ngrok.exe" if IS_WIN else "ngrok")
     if home_ngrok.is_file() and os.access(home_ngrok, os.X_OK):
         return str(home_ngrok)
     if LOCAL_NGROK.is_file() and os.access(LOCAL_NGROK, os.X_OK):
@@ -76,29 +78,42 @@ def ensure_ngrok_binary(verbose=False):
         arch = "arm"
     else:
         return ""
-    url = f"https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-{arch}.tgz"
+    os_name = "windows" if IS_WIN else "linux"
+    ext = "zip" if IS_WIN else "tgz"
+    url = f"https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-{os_name}-{arch}.{ext}"
     BIN_DIR.mkdir(exist_ok=True)
-    tgz_path = BIN_DIR / "ngrok.tgz"
+    archive_path = BIN_DIR / f"ngrok.{ext}"
     if verbose:
-        print(f"Downloading standalone ngrok ({arch}) into {LOCAL_NGROK} ...")
+        print(f"Downloading standalone ngrok ({os_name}-{arch}) into {LOCAL_NGROK} ...")
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "doomsday-connector/2.3.0"})
-        with urllib.request.urlopen(req, timeout=60) as resp, tgz_path.open("wb") as out:
+        with urllib.request.urlopen(req, timeout=60) as resp, archive_path.open("wb") as out:
             shutil.copyfileobj(resp, out)
-        with tarfile.open(tgz_path, "r:gz") as tar:
-            src = tar.extractfile("ngrok")
-            if src is None:
-                raise RuntimeError("ngrok binary not found in archive")
-            with LOCAL_NGROK.open("wb") as dst:
-                shutil.copyfileobj(src, dst)
-        os.chmod(LOCAL_NGROK, 0o755)
-        tgz_path.unlink(missing_ok=True)
-        write_log("INFO", "INSTALL", f"installed standalone ngrok ({arch}) -> {LOCAL_NGROK}")
+        if IS_WIN:
+            with zipfile.ZipFile(archive_path) as zf:
+                names = [n for n in zf.namelist() if n.lower().endswith("ngrok.exe")]
+                if not names:
+                    raise RuntimeError("ngrok binary not found in archive")
+                with zf.open(names[0]) as src, LOCAL_NGROK.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+        else:
+            with tarfile.open(archive_path, "r:gz") as tar:
+                src = tar.extractfile("ngrok")
+                if src is None:
+                    raise RuntimeError("ngrok binary not found in archive")
+                with LOCAL_NGROK.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+        try:
+            os.chmod(LOCAL_NGROK, 0o755)
+        except OSError:
+            pass
+        archive_path.unlink(missing_ok=True)
+        write_log("INFO", "INSTALL", f"installed standalone ngrok ({os_name}-{arch}) -> {LOCAL_NGROK}")
         if verbose:
             print("ngrok binary installed successfully.")
         return str(LOCAL_NGROK)
     except Exception as e:
-        tgz_path.unlink(missing_ok=True)
+        archive_path.unlink(missing_ok=True)
         write_log("WARN", "INSTALL", f"automatic ngrok download failed: {e}")
         if verbose:
             print(f"WARNING: automatic ngrok download failed: {e}", file=sys.stderr)
@@ -169,7 +184,7 @@ def sync_ngrok_yml(authtoken):
 
 
 def ensure_getent_shim():
-    if shutil.which("getent"):
+    if IS_WIN or shutil.which("getent"):
         return
     BIN_DIR.mkdir(exist_ok=True)
     shim = BIN_DIR / "getent"
@@ -370,6 +385,20 @@ def health():
 
 def list_all_processes():
     rows = []
+    if IS_WIN:
+        try:
+            p = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.CommandLine)\" }"],
+                capture_output=True, text=True, timeout=30,
+            )
+            for line in p.stdout.splitlines():
+                parts = line.strip().split(None, 1)
+                if len(parts) == 2 and parts[0].isdigit():
+                    rows.append((int(parts[0]), parts[1]))
+        except Exception:
+            pass
+        return rows
     proc_dir = Path("/proc")
     if proc_dir.is_dir():
         for entry in proc_dir.iterdir():
@@ -414,29 +443,43 @@ def find_connector_pids():
     return supervisors, workers
 
 
+def kill_process(pid, force=False):
+    """Terminate a process (and its children on Windows) without touching other PIDs."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return
+    if IS_WIN:
+        args = ["taskkill", "/T", "/PID", str(pid)]
+        if force:
+            args.insert(1, "/F")
+        try:
+            subprocess.run(args, capture_output=True, timeout=20)
+        except Exception:
+            pass
+        return
+    try:
+        os.kill(pid, signal.SIGKILL if force else signal.SIGTERM)
+    except OSError:
+        pass
+
+
 def stop_all_processes():
     if PID_FILE.is_file():
         try:
-            sup_pid = int(PID_FILE.read_text().strip())
-            os.kill(sup_pid, signal.SIGTERM)
+            kill_process(int(PID_FILE.read_text().strip()))
         except Exception:
             pass
     supervisors, workers = find_connector_pids()
     for pid, _ in supervisors:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
+        kill_process(pid)
     time.sleep(0.3)
     _, workers = find_connector_pids()
     all_targets = [pid for pid, _ in supervisors] + [pid for pid, _ in workers]
     for pid in all_targets:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
+        kill_process(pid)
 
-    deadline = time.time() + 2.0
+    deadline = time.time() + (5.0 if IS_WIN else 2.0)
     while time.time() < deadline:
         s_rem, w_rem = find_connector_pids()
         if not s_rem and not w_rem:
@@ -445,10 +488,7 @@ def stop_all_processes():
 
     s_rem, w_rem = find_connector_pids()
     for pid, _ in s_rem + w_rem:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
+        kill_process(pid, force=True)
 
     PID_FILE.unlink(missing_ok=True)
     (ROOT / "self_engine_state.json").unlink(missing_ok=True)
@@ -594,7 +634,8 @@ def daemon():
 
     tunnel_args = None
     if s["TUNNEL_CMD"]:
-        parsed = shlex.split(s["TUNNEL_CMD"])
+        parsed = shlex.split(s["TUNNEL_CMD"], posix=not IS_WIN)
+        parsed = [p[1:-1] if len(p) > 1 and p[0] == p[-1] == '"' else p for p in parsed]
         if parsed and (shutil.which(parsed[0]) or Path(parsed[0]).is_file()):
             tunnel_args = parsed
         else:

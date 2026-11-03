@@ -1,8 +1,10 @@
+import ctypes
 import hmac
 import json
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -13,6 +15,53 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 LOG_FILE = ROOT / "logs" / "connector.log"
+IS_WIN = os.name == "nt"
+
+
+def kill_tree(pid, group=True):
+    """Kill a process and its children (POSIX process group or Windows tree)."""
+    if IS_WIN:
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                           capture_output=True, timeout=15)
+        except Exception:
+            pass
+        return
+    try:
+        if group:
+            os.killpg(pid, signal.SIGKILL)
+        else:
+            os.kill(pid, signal.SIGKILL)
+    except Exception:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+
+
+def pid_alive(pid):
+    """Liveness probe that never signals the target process on Windows."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if IS_WIN:
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def detached_kwargs():
+    if IS_WIN:
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS}
+    return {"start_new_session": True}
 
 
 def write_log(level, message):
@@ -108,10 +157,11 @@ def build_cmd_env():
     termux_bin = "/data/data/com.termux/files/usr/bin"
     if os.path.isdir(termux_bin):
         extra.append(termux_bin)
+    sep = ";" if IS_WIN else ":"
     cur_path = env.get("PATH", "")
-    parts = [p for p in extra if p and p not in cur_path.split(":")]
+    parts = [p for p in extra if p and p not in cur_path.split(sep)]
     if parts:
-        env["PATH"] = ":".join(parts + ([cur_path] if cur_path else []))
+        env["PATH"] = sep.join(parts + ([cur_path] if cur_path else []))
     return env
 
 
@@ -124,19 +174,43 @@ def sh(command, timeout=60, cwd="~"):
         raise ValueError(f"cwd is not a directory: {workdir}")
     p = subprocess.Popen(
         command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        cwd=str(workdir), env=build_cmd_env(), start_new_session=True,
+        cwd=str(workdir), env=build_cmd_env(), **detached_kwargs(),
     )
     try:
         out, err = p.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        os.killpg(p.pid, signal.SIGKILL)
-        out, err = p.communicate()
+        kill_tree(p.pid)
+        try:
+            out, err = p.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            out, err = "", ""
         return clip(f"timeout after {timeout}s (killed)\n--stdout--\n{out}\n--stderr--\n{err}", True), True
     return clip(f"exit={p.returncode}\n--stdout--\n{out}\n--stderr--\n{err}", True), p.returncode != 0
 
 
 def run_command(command, timeout=60, cwd="~"):
     return sh(command, timeout, cwd)
+
+
+JOB_RUNNER = '''import pathlib, subprocess, sys, time
+
+d = pathlib.Path(__file__).resolve().parent
+command = (d / "cmd").read_text(encoding="utf-8")
+workdir = (d / "cwd").read_text(encoding="utf-8")
+started = time.time()
+rc = 127
+with (d / "log").open("wb") as f:
+    try:
+        proc = subprocess.Popen(
+            command, shell=True, cwd=workdir, stdin=subprocess.DEVNULL,
+            stdout=f, stderr=subprocess.STDOUT,
+        )
+        rc = proc.wait()
+    except Exception as exc:
+        f.write(("launcher error: %s: %s\\n" % (type(exc).__name__, exc)).encode("utf-8", "replace"))
+(d / "exit").write_text(str(rc), encoding="utf-8")
+(d / "secs").write_text(str(int(time.time() - started)), encoding="utf-8")
+'''
 
 
 def start_job(command, cwd="~"):
@@ -148,17 +222,16 @@ def start_job(command, cwd="~"):
     jid = time.strftime("%H%M%S-") + uuid.uuid4().hex[:4]
     d = JOBS / jid
     d.mkdir()
-    (d / "cmd").write_text(command)
-    wrapper = (
-        f"start=$(date +%s); ({command}) > {d}/log 2>&1; "
-        f"echo $? > {d}/exit; echo $(( $(date +%s) - start )) > {d}/secs"
-    )
+    (d / "cmd").write_text(command, encoding="utf-8")
+    (d / "cwd").write_text(str(workdir), encoding="utf-8")
+    (d / "runner.py").write_text(JOB_RUNNER, encoding="utf-8")
+    (d / "started").write_text(str(int(time.time())), encoding="utf-8")
     p = subprocess.Popen(
-        ["sh", "-c", wrapper], cwd=str(workdir), env=build_cmd_env(), start_new_session=True,
+        [sys.executable, str(d / "runner.py")], cwd=str(workdir), env=build_cmd_env(),
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        **detached_kwargs(),
     )
-    (d / "pid").write_text(str(p.pid))
-    (d / "started").write_text(str(int(time.time())))
+    (d / "pid").write_text(str(p.pid), encoding="utf-8")
     return jid, False
 
 
@@ -166,12 +239,10 @@ def job_info(d, tail):
     started = int((d / "started").read_text())
     if (d / "exit").exists():
         state = f"done exit={(d / 'exit').read_text().strip()} secs={(d / 'secs').read_text().strip()}"
+    elif (d / "pid").is_file() and pid_alive((d / "pid").read_text().strip()):
+        state = f"running elapsed={int(time.time()) - started}s"
     else:
-        try:
-            os.kill(int((d / "pid").read_text()), 0)
-            state = f"running elapsed={int(time.time()) - started}s"
-        except OSError:
-            state = "dead (killed)"
+        state = "dead (killed)"
     log = (d / "log").read_text(errors="replace") if (d / "log").exists() else ""
     return f"{d.name} [{state}] cmd={(d / 'cmd').read_text()[:120]}", "\n".join(log.splitlines()[-tail:])
 
@@ -196,11 +267,43 @@ def job_kill(id):
     d = JOBS / id
     if not d.is_dir() or not (d / "pid").is_file():
         return "no such job", True
-    os.killpg(int((d / "pid").read_text()), signal.SIGKILL)
+    kill_tree(int((d / "pid").read_text().strip()))
     return f"killed {id}", False
 
 
 def sys_info():
+    if IS_WIN:
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = MEMORYSTATUSEX()
+        status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
+        mib = 1024 * 1024
+        lines = [
+            f"cpus={os.cpu_count()} platform={sys.platform} host={os.environ.get('COMPUTERNAME', '')}",
+            f"memory: total={status.ullTotalPhys // mib}MB free={status.ullAvailPhys // mib}MB used={status.dwMemoryLoad}%",
+            f"pagefile: total={status.ullTotalPageFile // mib}MB free={status.ullAvailPageFile // mib}MB",
+            "top processes (working set):",
+        ]
+        try:
+            p = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-Process | Sort-Object -Descending WorkingSet64 | Select-Object -First 8 "
+                 "-Property Id,ProcessName,@{n='MB';e={[math]::Round($_.WorkingSet64/1MB)}} | "
+                 "Format-Table -HideTableHeaders -AutoSize | Out-String -Width 110"],
+                capture_output=True, text=True, timeout=25,
+            )
+            lines.extend(ln.rstrip() for ln in p.stdout.splitlines() if ln.strip())
+        except Exception as e:
+            lines.append(f"ps error: {type(e).__name__}: {e}")
+        return clip("\n".join(lines)), False
     cmd = (
         "nproc; uptime; free -m; "
         "for f in /sys/class/thermal/thermal_zone*/temp; do cat $f; done 2>/dev/null | head -3; "
@@ -215,7 +318,7 @@ def read_file(path, start=None, end=None):
         raise FileNotFoundError(str(p))
     if p.stat().st_size > 5_000_000:
         raise ValueError("file exceeds 5 MB read limit")
-    text = p.read_text(errors="replace")
+    text = p.read_text(encoding="utf-8", errors="replace")
     if start or end:
         text = "\n".join(text.splitlines()[(start or 1) - 1:end])
     return clip(text), False
@@ -228,7 +331,7 @@ def write_file(path, content):
     p.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=f".{p.name}.", suffix=".tmp", dir=str(p.parent))
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
             f.flush()
             os.fsync(f.fileno())
@@ -242,21 +345,21 @@ def write_file(path, content):
 def append_file(path, content):
     p = Path(path).expanduser()
     p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("a") as f:
+    with p.open("a", encoding="utf-8") as f:
         f.write(content)
     return f"appended {len(content)} chars -> {p}", False
 
 
 def edit_file(path, old, new):
     p = Path(path).expanduser()
-    text = p.read_text()
+    text = p.read_text(encoding="utf-8")
     n = text.count(old)
     if n != 1:
         return f"expected 1 match, found {n}", True
     updated = text.replace(old, new)
     fd, tmp = tempfile.mkstemp(prefix=f".{p.name}.", suffix=".tmp", dir=str(p.parent))
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(updated)
             f.flush()
             os.fsync(f.fileno())
