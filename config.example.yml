@@ -7,4 +7,7 @@ MCP_TOKEN: "REPLACE_WITH_A_LONG_RANDOM_SECRET"
 HOST: "127.0.0.1"
 PORT: 8765
 TUNNEL_CMD: ""
+# Shell used by run_command/start_job. Empty = auto (Git Bash on Windows, /bin/sh elsewhere).
+# Set to "cmd" to force classic cmd.exe behavior on Windows.
+SHELL_BIN: ""
 

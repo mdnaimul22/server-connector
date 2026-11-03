@@ -2,6 +2,7 @@ import ctypes
 import hmac
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -16,6 +17,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 LOG_FILE = ROOT / "logs" / "connector.log"
 IS_WIN = os.name == "nt"
+GIT_BASH_CANDIDATES = (
+    Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "usr" / "bin" / "bash.exe",
+    Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe",
+    Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Git" / "usr" / "bin" / "bash.exe",
+)
 
 
 def kill_tree(pid, group=True):
@@ -64,6 +70,36 @@ def detached_kwargs():
     return {"start_new_session": True}
 
 
+def find_bash():
+    """Locate a POSIX shell so Linux-style commands behave the same everywhere."""
+    if not IS_WIN:
+        return ""
+    found = shutil.which("bash")
+    if found:
+        return found
+    for candidate in GIT_BASH_CANDIDATES:
+        if candidate.is_file():
+            return str(candidate)
+    return ""
+
+
+def resolve_shell_prefix(cfg):
+    configured = (os.environ.get("SHELL_BIN") or cfg.get("SHELL_BIN") or "").strip()
+    if configured:
+        if configured.lower() in ("cmd", "cmd.exe", "powershell", "powershell.exe", "none"):
+            return []
+        candidate = Path(configured)
+        if candidate.is_file():
+            return [str(candidate), "-c"]
+        found = shutil.which(configured)
+        if found:
+            return [found, "-c"]
+    bash = find_bash()
+    if bash:
+        return [bash, "-c"]
+    return []
+
+
 def write_log(level, message):
     try:
         LOG_FILE.parent.mkdir(exist_ok=True)
@@ -96,6 +132,7 @@ def load_config():
 
 
 CFG = load_config()
+SHELL_PREFIX = resolve_shell_prefix(CFG)
 TOKEN = os.environ.get("MCP_TOKEN") or CFG.get("MCP_TOKEN") or ""
 if not TOKEN or TOKEN == "REPLACE_WITH_A_LONG_RANDOM_SECRET":
     raise RuntimeError("Valid MCP_TOKEN is required in config.yml or environment")
@@ -154,6 +191,12 @@ def clip(s, tail=False):
 def build_cmd_env():
     env = os.environ.copy()
     extra = [str(ROOT / "bin"), str(Path.home() / "bin")]
+    if IS_WIN:
+        git_root = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git"
+        for sub in ("usr/bin", "mingw64/bin", "bin", "cmd"):
+            candidate = git_root / sub
+            if candidate.is_dir():
+                extra.append(str(candidate))
     termux_bin = "/data/data/com.termux/files/usr/bin"
     if os.path.isdir(termux_bin):
         extra.append(termux_bin)
@@ -172,8 +215,10 @@ def sh(command, timeout=60, cwd="~"):
     workdir = Path(os.path.expanduser(cwd)).resolve()
     if not workdir.is_dir():
         raise ValueError(f"cwd is not a directory: {workdir}")
+    args = SHELL_PREFIX + [command] if SHELL_PREFIX else command
     p = subprocess.Popen(
-        command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        args, shell=not SHELL_PREFIX, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace",
         cwd=str(workdir), env=build_cmd_env(), **detached_kwargs(),
     )
     try:
@@ -192,17 +237,20 @@ def run_command(command, timeout=60, cwd="~"):
     return sh(command, timeout, cwd)
 
 
-JOB_RUNNER = '''import pathlib, subprocess, sys, time
+JOB_RUNNER = '''import json, pathlib, subprocess, sys, time
 
 d = pathlib.Path(__file__).resolve().parent
 command = (d / "cmd").read_text(encoding="utf-8")
 workdir = (d / "cwd").read_text(encoding="utf-8")
+prefix_file = d / "shell.json"
+prefix = json.loads(prefix_file.read_text(encoding="utf-8")) if prefix_file.is_file() else []
+args = prefix + [command] if prefix else command
 started = time.time()
 rc = 127
 with (d / "log").open("wb") as f:
     try:
         proc = subprocess.Popen(
-            command, shell=True, cwd=workdir, stdin=subprocess.DEVNULL,
+            args, shell=not prefix, cwd=workdir, stdin=subprocess.DEVNULL,
             stdout=f, stderr=subprocess.STDOUT,
         )
         rc = proc.wait()
@@ -225,6 +273,7 @@ def start_job(command, cwd="~"):
     (d / "cmd").write_text(command, encoding="utf-8")
     (d / "cwd").write_text(str(workdir), encoding="utf-8")
     (d / "runner.py").write_text(JOB_RUNNER, encoding="utf-8")
+    (d / "shell.json").write_text(json.dumps(SHELL_PREFIX), encoding="utf-8")
     (d / "started").write_text(str(int(time.time())), encoding="utf-8")
     p = subprocess.Popen(
         [sys.executable, str(d / "runner.py")], cwd=str(workdir), env=build_cmd_env(),
@@ -243,8 +292,8 @@ def job_info(d, tail):
         state = f"running elapsed={int(time.time()) - started}s"
     else:
         state = "dead (killed)"
-    log = (d / "log").read_text(errors="replace") if (d / "log").exists() else ""
-    return f"{d.name} [{state}] cmd={(d / 'cmd').read_text()[:120]}", "\n".join(log.splitlines()[-tail:])
+    log = (d / "log").read_text(encoding="utf-8", errors="replace") if (d / "log").exists() else ""
+    return f"{d.name} [{state}] cmd={(d / 'cmd').read_text(encoding='utf-8', errors='replace')[:120]}", "\n".join(log.splitlines()[-tail:])
 
 
 def job_status(id=None, tail=15):

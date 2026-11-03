@@ -1,6 +1,6 @@
 # doomsday-connector
 
-Minimal MCP server over HTTP to give ChatGPT, Claude, Antigravity, or any remote MCP client direct shell and file access to an Android phone (Termux) or a Linux machine.
+Minimal MCP server over HTTP to give ChatGPT, Claude, Antigravity, or any remote MCP client direct shell and file access to an Android phone (Termux), a Linux machine, or a Windows machine (via Git for Windows).
 
 Built specifically with the Python standard library only. No `pip install`, no virtualenvs, and no C-extension wheel builds that break on Termux.
 
@@ -8,7 +8,26 @@ Built specifically with the Python standard library only. No `pip install`, no v
 
 - **Stdlib only:** Runs out of the box on stock Python 3 (`http.server`, `subprocess`, `urllib`).
 - **Single config (`config.yml`):** Everything lives in one file. No `.env` quoting issues or scattered tunnel configs.
-- **Auto tunnel setup:** If `ngrok` isn't installed on the machine, `./start.sh` pulls the right static binary (`amd64` / `arm64` / `arm`) into `./bin/ngrok` and generates the runtime config with public DNS resolvers (`8.8.8.8`, `1.1.1.1`) and automatic `proot` `/etc/resolv.conf` binding on Termux so DNS never fails.
+- **Auto tunnel setup:** If `ngrok` isn't installed on the machine, `./start.sh` pulls the right static binary (`amd64` / `arm64` / `arm`, `.tgz` on Linux/Termux and `.zip` on Windows) into `./bin/ngrok` and generates the runtime config with public DNS resolvers (`8.8.8.8`, `1.1.1.1`) and automatic `proot` `/etc/resolv.conf` binding on Termux so DNS never fails.
+- **Same shell everywhere:** `run_command` and `start_job` always execute through a POSIX shell. On Windows that is Git Bash, so `grep`, `sed`, `awk`, `find`, pipes, `&&`, `$VARS`, and heredocs behave exactly like on Linux instead of hitting `cmd.exe` limitations.
+
+## Windows notes
+
+Requirements: **Python 3** and **Git for Windows** (for `bash`, `chmod`, and the coreutils). Install both, then run the setup from Git Bash:
+
+```sh
+git clone https://github.com/mdnaimul22/server-connector.git
+cd server-connector
+chmod +x *.sh
+./install.sh
+./start.sh
+```
+
+- Commands given to `run_command` are evaluated by `bash -c`, so use Unix syntax. Windows executables still work: `cmd //c dir` (the doubled slash stops MSYS from rewriting `/c` to a path), `powershell -NoProfile -Command '...'` (single quotes, otherwise bash expands `$variables` first), `notepad.exe`, etc.
+- Paths can be either `C:/Users/you/file` or `/c/Users/you/file`.
+- Output is decoded as UTF-8 on every platform, so non-ASCII text (and stray binary bytes) no longer turns into `None` or raises decode errors.
+- Set `SHELL_BIN` in `config.yml` to override the shell, or to `"cmd"` to force classic `cmd.exe`.
+- Background jobs are launched through a small Python runner, so they survive server restarts and report their exit code and duration on both Windows and POSIX.
 
 ## Setup
 
@@ -28,6 +47,7 @@ MCP_TOKEN: "auto-generated-or-your-own-secret"
 HOST: "127.0.0.1"
 PORT: 8765
 TUNNEL_CMD: ""
+SHELL_BIN: ""
 ```
 
 Start it:
