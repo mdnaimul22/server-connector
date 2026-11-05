@@ -53,71 +53,251 @@ def write_log(level, component, message):
         f.write(line)
 
 
-def find_ngrok_bin():
-    sys_ngrok = shutil.which("ngrok")
-    if sys_ngrok:
-        return sys_ngrok
-    home_ngrok = Path.home() / "ngrok" / ("ngrok.exe" if IS_WIN else "ngrok")
-    if home_ngrok.is_file() and os.access(home_ngrok, os.X_OK):
-        return str(home_ngrok)
-    if LOCAL_NGROK.is_file() and os.access(LOCAL_NGROK, os.X_OK):
-        return str(LOCAL_NGROK)
+NGROK_BASE_URL = "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-{os}-{arch}.{ext}"
+_NGROK_FLAG_CACHE = {}
+
+
+def platform_kind():
+    """Classify the host so every platform gets its own install branch."""
+    if IS_WIN:
+        return "windows"
+    if Path("/data/data/com.termux/files/usr").is_dir():
+        return "termux"
+    system = platform.system().lower()
+    if system in ("linux", "darwin"):
+        return system
+    return system or "unknown"
+
+
+def ngrok_arch():
+    machine = platform.machine().lower()
+    if machine in ("x86_64", "amd64", "x64"):
+        return "amd64"
+    if machine in ("aarch64", "arm64"):
+        return "arm64"
+    if machine.startswith("arm"):
+        return "arm"
     return ""
 
 
-def ensure_ngrok_binary(verbose=False):
-    existing = find_ngrok_bin()
-    if existing:
-        return existing
-    machine = platform.machine().lower()
-    if machine in ("x86_64", "amd64"):
-        arch = "amd64"
-    elif machine in ("aarch64", "arm64"):
-        arch = "arm64"
-    elif machine.startswith("arm"):
-        arch = "arm"
-    else:
+def _ngrok_candidates_windows():
+    local = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+    program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+    program_files_x86 = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
+    candidates = [
+        local / "Microsoft" / "WinGet" / "Links" / "ngrok.exe",
+        local / "ngrok" / "ngrok.exe",
+        program_files / "ngrok" / "ngrok.exe",
+        program_files_x86 / "ngrok" / "ngrok.exe",
+    ]
+    # winget sometimes extracts the package without creating the Links shim, so
+    # look inside the package folders as well.
+    packages = local / "Microsoft" / "WinGet" / "Packages"
+    if packages.is_dir():
+        for package_dir in sorted(packages.glob("Ngrok*")):
+            candidates.extend(sorted(package_dir.rglob("ngrok.exe")))
+    return candidates
+
+
+def _ngrok_candidates_posix():
+    return [
+        Path("/usr/local/bin/ngrok"),
+        Path("/usr/bin/ngrok"),
+        Path("/snap/bin/ngrok"),
+        Path("/opt/homebrew/bin/ngrok"),
+        Path("/usr/local/opt/ngrok/bin/ngrok"),
+        Path.home() / "ngrok" / "ngrok",
+        Path.home() / "bin" / "ngrok",
+    ]
+
+
+def find_ngrok_bin():
+    # The project-managed binary wins: it is the one an install/update would refresh.
+    try:
+        if LOCAL_NGROK.is_file():
+            return str(LOCAL_NGROK)
+    except OSError:
+        pass
+    found = shutil.which("ngrok")
+    if found:
+        return found
+    candidates = _ngrok_candidates_windows() if IS_WIN else _ngrok_candidates_posix()
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return str(candidate)
+        except OSError:
+            continue
+    return ""
+
+
+def _ngrok_version(binary):
+    try:
+        proc = subprocess.run([binary, "version"], capture_output=True, text=True, timeout=20)
+    except Exception:
         return ""
-    os_name = "windows" if IS_WIN else "linux"
-    ext = "zip" if IS_WIN else "tgz"
-    url = f"https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-{os_name}-{arch}.{ext}"
+    match = re.search(r"ngrok version\s+([0-9][^\s]*)", (proc.stdout or "") + (proc.stderr or ""), re.IGNORECASE)
+    return match.group(1) if match else ""
+
+
+def _download(url, destination):
+    req = urllib.request.Request(url, headers={"User-Agent": "doomsday-connector/2.3.0"})
+    with urllib.request.urlopen(req, timeout=120) as resp, destination.open("wb") as out:
+        shutil.copyfileobj(resp, out)
+
+
+def _extract_zip(archive, destination):
+    with zipfile.ZipFile(archive) as zf:
+        names = [n for n in zf.namelist() if Path(n).name in ("ngrok.exe", "ngrok")]
+        if not names:
+            raise RuntimeError("ngrok binary not found in archive")
+        with zf.open(names[0]) as src, destination.open("wb") as dst:
+            shutil.copyfileobj(src, dst)
+
+
+def _extract_tgz(archive, destination):
+    with tarfile.open(archive, "r:gz") as tar:
+        member = next((m for m in tar.getmembers() if Path(m.name).name == "ngrok" and m.isfile()), None)
+        if member is None:
+            raise RuntimeError("ngrok binary not found in archive")
+        src = tar.extractfile(member)
+        with destination.open("wb") as dst:
+            shutil.copyfileobj(src, dst)
+
+
+def _install_ngrok_archive(os_name, arch, ext, verbose=False, hint=""):
+    """Download and unpack the standalone ngrok build for one platform."""
+    url = NGROK_BASE_URL.format(os=os_name, arch=arch, ext=ext)
+    label = f"{os_name}-{arch}"
     BIN_DIR.mkdir(exist_ok=True)
     archive_path = BIN_DIR / f"ngrok.{ext}"
     if verbose:
-        print(f"Downloading standalone ngrok ({os_name}-{arch}) into {LOCAL_NGROK} ...")
+        print(f"Downloading standalone ngrok ({label}) into {LOCAL_NGROK} ...")
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "doomsday-connector/2.3.0"})
-        with urllib.request.urlopen(req, timeout=60) as resp, archive_path.open("wb") as out:
-            shutil.copyfileobj(resp, out)
-        if IS_WIN:
-            with zipfile.ZipFile(archive_path) as zf:
-                names = [n for n in zf.namelist() if n.lower().endswith("ngrok.exe")]
-                if not names:
-                    raise RuntimeError("ngrok binary not found in archive")
-                with zf.open(names[0]) as src, LOCAL_NGROK.open("wb") as dst:
-                    shutil.copyfileobj(src, dst)
+        _download(url, archive_path)
+        if ext == "zip":
+            _extract_zip(archive_path, LOCAL_NGROK)
         else:
-            with tarfile.open(archive_path, "r:gz") as tar:
-                src = tar.extractfile("ngrok")
-                if src is None:
-                    raise RuntimeError("ngrok binary not found in archive")
-                with LOCAL_NGROK.open("wb") as dst:
-                    shutil.copyfileobj(src, dst)
+            _extract_tgz(archive_path, LOCAL_NGROK)
         try:
             os.chmod(LOCAL_NGROK, 0o755)
         except OSError:
             pass
         archive_path.unlink(missing_ok=True)
-        write_log("INFO", "INSTALL", f"installed standalone ngrok ({os_name}-{arch}) -> {LOCAL_NGROK}")
+        write_log("INFO", "INSTALL", f"installed standalone ngrok ({label}) -> {LOCAL_NGROK}")
         if verbose:
             print("ngrok binary installed successfully.")
         return str(LOCAL_NGROK)
     except Exception as e:
         archive_path.unlink(missing_ok=True)
-        write_log("WARN", "INSTALL", f"automatic ngrok download failed: {e}")
+        message = f"automatic ngrok download failed ({label}): {e}"
+        if hint:
+            message += f" | {hint}"
+        write_log("WARN", "INSTALL", message)
         if verbose:
-            print(f"WARNING: automatic ngrok download failed: {e}", file=sys.stderr)
+            print(f"WARNING: {message}", file=sys.stderr)
         return ""
+
+
+def _ensure_ngrok_windows(arch, verbose=False):
+    # 1) Direct zip download first: winget's Ngrok.Ngrok package can be stale
+    #    (3.3.1 at the time of writing), and ngrok rejects agents older than 3.28.
+    result = _install_ngrok_archive(
+        "windows", arch, "zip", verbose,
+        hint=("Windows Defender may have blocked the download; add an exclusion for "
+              f"{BIN_DIR} or install ngrok manually from https://ngrok.com/download"),
+    )
+    if result:
+        return result
+
+    # 2) Official winget package as a fallback when the download is blocked.
+    if shutil.which("winget"):
+        if verbose:
+            print("Falling back to winget (Ngrok.Ngrok) ...")
+        try:
+            proc = subprocess.run(
+                [
+                    "winget", "install", "--id", "Ngrok.Ngrok", "-e", "--source", "winget",
+                    "--accept-package-agreements", "--accept-source-agreements",
+                    "--disable-interactivity",
+                ],
+                capture_output=True, text=True, timeout=600,
+            )
+            found = find_ngrok_bin()
+            if found:
+                version = _ngrok_version(found) or "unknown"
+                try:
+                    shutil.copy2(found, LOCAL_NGROK)
+                    target = str(LOCAL_NGROK)
+                except Exception as e:
+                    write_log("WARN", "INSTALL", f"could not copy winget ngrok into {LOCAL_NGROK}: {e}")
+                    target = found
+                if verbose:
+                    print(f"ngrok installed via winget: {target} (v{version})")
+                write_log("INFO", "INSTALL", f"installed ngrok via winget -> {target} (v{version})")
+                return target
+            output = (proc.stdout or proc.stderr or "").strip().splitlines()
+            detail = output[-1] if output else f"rc={proc.returncode}"
+            write_log("WARN", "INSTALL", f"winget did not provide ngrok: {detail[:160]}")
+        except Exception as e:
+            write_log("WARN", "INSTALL", f"winget install failed: {type(e).__name__}: {e}")
+    return ""
+
+
+def _ensure_ngrok_termux(arch, verbose=False):
+    return _install_ngrok_archive(
+        "linux", arch, "tgz", verbose,
+        hint=("if DNS fails on Termux, bind the host resolv.conf with proot "
+              "or set TUNNEL_CMD manually"),
+    )
+
+
+def _ensure_ngrok_linux(arch, verbose=False):
+    return _install_ngrok_archive(
+        "linux", arch, "tgz", verbose,
+        hint=("install ngrok with your package manager (for example "
+              "'snap install ngrok') or place the binary in ./bin/ngrok"),
+    )
+
+
+def _ensure_ngrok_darwin(arch, verbose=False):
+    return _install_ngrok_archive(
+        "darwin", arch, "zip", verbose,
+        hint="or install ngrok with 'brew install ngrok/ngrok/ngrok'",
+    )
+
+
+def ensure_ngrok_binary(verbose=False):
+    """Ensure the project-managed ngrok exists, installing one per platform if needed."""
+    try:
+        if LOCAL_NGROK.is_file():
+            return str(LOCAL_NGROK)
+    except OSError:
+        pass
+
+    kind = platform_kind()
+    arch = ngrok_arch()
+    if not arch:
+        message = f"unsupported CPU architecture for automatic ngrok install: {platform.machine()}"
+        write_log("WARN", "INSTALL", message)
+        if verbose:
+            print(f"WARNING: {message}", file=sys.stderr)
+        return ""
+
+    if kind == "windows":
+        return _ensure_ngrok_windows(arch, verbose)
+    if kind == "termux":
+        return _ensure_ngrok_termux(arch, verbose)
+    if kind == "linux":
+        return _ensure_ngrok_linux(arch, verbose)
+    if kind == "darwin":
+        return _ensure_ngrok_darwin(arch, verbose)
+
+    message = f"automatic ngrok install is not implemented for platform '{kind}'"
+    write_log("WARN", "INSTALL", message)
+    if verbose:
+        print(f"WARNING: {message}", file=sys.stderr)
+    return ""
 
 
 def load_config(path=None):
@@ -169,12 +349,11 @@ def sync_ngrok_yml(authtoken):
     if not authtoken:
         return
     content = (
-        'version: "3"\n'
-        "agent:\n"
-        f'  authtoken: "{authtoken}"\n'
-        "  dns_resolver_ips:\n"
-        "    - 8.8.8.8\n"
-        "    - 1.1.1.1\n"
+        'version: "2"\n'
+        f'authtoken: "{authtoken}"\n'
+        "dns_resolver_ips:\n"
+        "  - 8.8.8.8\n"
+        "  - 1.1.1.1\n"
     )
     NGROK_RUNTIME_YML.write_text(content, encoding="utf-8")
     try:
@@ -296,6 +475,31 @@ def init_config(verbose=False):
     return cfg
 
 
+def ngrok_domain_flag(binary):
+    """Pick the reserved-domain flag the installed ngrok understands (--url vs --domain)."""
+    if not binary:
+        return "--url"
+    cached = _NGROK_FLAG_CACHE.get(binary)
+    if cached:
+        return cached
+    flag = ""
+    try:
+        probe = subprocess.run(
+            [binary, "http", "--help"],
+            capture_output=True, text=True, timeout=20,
+        )
+        help_text = (probe.stdout or "") + (probe.stderr or "")
+        if "--url" in help_text:
+            flag = "--url"
+        elif "--domain" in help_text:
+            flag = "--domain"
+    except Exception:
+        pass
+    flag = flag or "--url"
+    _NGROK_FLAG_CACHE[binary] = flag
+    return flag
+
+
 def resolve_tunnel_cmd(cfg):
     raw_cmd = cfg.get("TUNNEL_CMD", "").strip()
     if raw_cmd.lower() in ("none", "off", "false", "disable", "disabled"):
@@ -316,7 +520,9 @@ def resolve_tunnel_cmd(cfg):
             return ""
         cmd = f'{proot_prefix}"{ngrok_bin}" http --config "{ngrok_cfg}"'
         if domain:
-            cmd += f' --url="{domain}"'
+            flag = ngrok_domain_flag(ngrok_bin)
+            value = f"https://{domain}" if flag == "--url" else domain
+            cmd += f' {flag}="{value}"'
         cmd += f" {host}:{port} --log=stdout --log-format=logfmt"
         return cmd
 
@@ -332,7 +538,9 @@ def resolve_tunnel_cmd(cfg):
         if "--config" not in cmd and authtoken:
             extra += f' --config "{ngrok_cfg}"'
         if domain and not any(f in cmd for f in ("--domain", "--url", "--hostname")):
-            extra += f' --url="{domain}"'
+            flag = ngrok_domain_flag(ngrok_bin)
+            value = f"https://{domain}" if flag == "--url" else domain
+            extra += f' {flag}="{value}"'
         if "--log=" not in cmd:
             extra += " --log=stdout --log-format=logfmt"
         cmd = re.sub(r"^ngrok(\s+http)\b", f'{proot_prefix}"{ngrok_bin}"\\1' + extra, cmd, count=1)
@@ -635,7 +843,13 @@ def daemon():
     tunnel_args = None
     if s["TUNNEL_CMD"]:
         parsed = shlex.split(s["TUNNEL_CMD"], posix=not IS_WIN)
-        parsed = [p[1:-1] if len(p) > 1 and p[0] == p[-1] == '"' else p for p in parsed]
+        if IS_WIN:
+            # posix=False keeps quotes inside tokens ("--url=x", '"C:\\path\\ngrok.exe"'),
+            # which Windows programs would receive literally.
+            parsed = [re.sub(r'"([^"]*)"', r"\1", p) for p in parsed]
+            parsed = [re.sub(r"'([^']*)'", r"\1", p) for p in parsed]
+        else:
+            parsed = [p[1:-1] if len(p) > 1 and p[0] == p[-1] == '"' else p for p in parsed]
         if parsed and (shutil.which(parsed[0]) or Path(parsed[0]).is_file()):
             tunnel_args = parsed
         else:

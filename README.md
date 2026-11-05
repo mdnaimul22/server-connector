@@ -8,7 +8,7 @@ Built specifically with the Python standard library only. No `pip install`, no v
 
 - **Stdlib only:** Runs out of the box on stock Python 3 (`http.server`, `subprocess`, `urllib`).
 - **Single config (`config.yml`):** Everything lives in one file. No `.env` quoting issues or scattered tunnel configs.
-- **Auto tunnel setup:** If `ngrok` isn't installed on the machine, `./start.sh` pulls the right static binary (`amd64` / `arm64` / `arm`, `.tgz` on Linux/Termux and `.zip` on Windows) into `./bin/ngrok` and generates the runtime config with public DNS resolvers (`8.8.8.8`, `1.1.1.1`) and automatic `proot` `/etc/resolv.conf` binding on Termux so DNS never fails.
+- **Auto tunnel setup:** If `ngrok` isn't installed, `./start.sh` installs the right static binary per platform — `.tgz` on Termux/Linux, `.zip` on Windows/macOS — into `./bin/ngrok`, generates a runtime config with public DNS resolvers (`8.8.8.8`, `1.1.1.1`), and binds `/etc/resolv.conf` through `proot` on Termux so DNS never fails. The reserved-domain flag is detected from the installed agent (`--url` on modern ngrok, `--domain` on older ones), and `./bin/ngrok` always takes priority over a system copy.
 - **Same shell everywhere:** `run_command` and `start_job` always execute through a POSIX shell. On Windows that is Git Bash, so `grep`, `sed`, `awk`, `find`, pipes, `&&`, `$VARS`, and heredocs behave exactly like on Linux instead of hitting `cmd.exe` limitations.
 
 ## Windows notes
@@ -32,11 +32,22 @@ chmod +x *.sh
 ## Setup
 
 ```sh
-git clone https://github.com/mdnaimul22/doomsday-connector.git
-cd doomsday-connector
+git clone https://github.com/mdnaimul22/server-connector.git
+cd server-connector
 chmod +x *.sh
 ./install.sh
 ```
+
+`install.sh` detects the platform once and then follows an explicit branch:
+
+| Platform | Installer behavior |
+|---|---|
+| Termux | `pkg install python curl proot dnsutils` |
+| Linux | `apt-get`, `dnf`, or `pacman` (through `sudo` when not root) |
+| macOS | `brew install python3` when Homebrew exists, otherwise prints the download link |
+| Windows | verifies Python 3 and Git Bash, and prints the exact `winget` commands if either is missing |
+
+On Windows run everything from **Git Bash** (installed with Git for Windows), not PowerShell.
 
 Open `config.yml` and drop in your ngrok `authtoken` and static `tunnel_domain`:
 

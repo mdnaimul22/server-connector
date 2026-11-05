@@ -1,0 +1,7 @@
+# Keep shell scripts LF so a Windows checkout still runs in Git Bash.
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+bin/* binary
