@@ -133,7 +133,8 @@ def find_ngrok_bin():
 
 def _ngrok_version(binary):
     try:
-        proc = subprocess.run([binary, "version"], capture_output=True, text=True, timeout=20)
+        proc = subprocess.run([binary, "version"], capture_output=True, text=True, timeout=20,
+                              creationflags=no_window_flags())
     except Exception:
         return ""
     match = re.search(r"ngrok version\s+([0-9][^\s]*)", (proc.stdout or "") + (proc.stderr or ""), re.IGNORECASE)
@@ -222,6 +223,7 @@ def _ensure_ngrok_windows(arch, verbose=False):
                     "--disable-interactivity",
                 ],
                 capture_output=True, text=True, timeout=600,
+                creationflags=no_window_flags(),
             )
             found = find_ngrok_bin()
             if found:
@@ -487,6 +489,7 @@ def ngrok_domain_flag(binary):
         probe = subprocess.run(
             [binary, "http", "--help"],
             capture_output=True, text=True, timeout=20,
+            creationflags=no_window_flags(),
         )
         help_text = (probe.stdout or "") + (probe.stderr or "")
         if "--url" in help_text:
@@ -598,7 +601,7 @@ def list_all_processes():
             p = subprocess.run(
                 ["powershell", "-NoProfile", "-Command",
                  "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.CommandLine)\" }"],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, timeout=30, creationflags=no_window_flags(),
             )
             for line in p.stdout.splitlines():
                 parts = line.strip().split(None, 1)
@@ -662,7 +665,7 @@ def kill_process(pid, force=False):
         if force:
             args.insert(1, "/F")
         try:
-            subprocess.run(args, capture_output=True, timeout=20)
+            subprocess.run(args, capture_output=True, timeout=20, creationflags=no_window_flags())
         except Exception:
             pass
         return
@@ -883,6 +886,7 @@ def daemon():
                 stdin=subprocess.DEVNULL,
                 stdout=server_err_file,
                 stderr=server_err_file,
+                creationflags=no_window_flags(),
             )
 
         if tunnel_args is not None and (tunnel_proc is None or tunnel_proc.poll() is not None):
@@ -913,6 +917,7 @@ def daemon():
                 stdin=subprocess.DEVNULL,
                 stdout=tunnel_err_file,
                 stderr=tunnel_err_file,
+                creationflags=no_window_flags(),
             )
 
         now_ts = time.time()
@@ -1036,11 +1041,47 @@ def _ps_quote(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
+def no_window_flags():
+    """Avoid flashing console windows when the parent has no console."""
+    return getattr(subprocess, "CREATE_NO_WINDOW", 0) if IS_WIN else 0
+
+
 def _run_powershell(script, timeout=180):
     return subprocess.run(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
-        capture_output=True, text=True, timeout=timeout,
+        capture_output=True, text=True, timeout=timeout, creationflags=no_window_flags(),
     )
+
+
+def spawn_hidden():
+    """Start the service with no console window (used by the Windows logon task)."""
+    bash = _find_bash()
+    if not bash:
+        write_log("ERROR", "AUTOSTART", "Git Bash was not found; cannot start the connector")
+        return False
+    script = _msys_path(ROOT / "start.sh")
+    if " " in script:
+        script = f"'{script}'"
+    LOGS.mkdir(exist_ok=True)
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        with (LOGS / "autostart.log").open("ab") as out:
+            out.write(f"[{now()}] launch: {bash} -c exec {script}\n".encode("utf-8"))
+            out.flush()
+            subprocess.Popen(
+                [bash, "-c", f"exec {script}"],
+                cwd=str(ROOT),
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=subprocess.STDOUT,
+                creationflags=flags,
+                close_fds=True,
+            )
+    except Exception as e:
+        write_log("ERROR", "AUTOSTART", f"hidden launch failed: {type(e).__name__}: {e}")
+        return False
+    write_log("INFO", "AUTOSTART", "started silently (no console window)")
+    return True
 
 
 def _autostart_windows_install():
@@ -1048,10 +1089,14 @@ def _autostart_windows_install():
     if not bash:
         write_log("ERROR", "AUTOSTART", "Git Bash was not found; cannot register the logon task")
         return False
-    start_script = _msys_path(ROOT / "start.sh")
-    if " " in start_script:
-        start_script = f"'{start_script}'"
-    argument = f'-c "exec {start_script}"'
+    pythonw = Path(sys.executable).with_name("pythonw.exe")
+    if not pythonw.is_file():
+        pythonw = Path(sys.executable)
+    # pythonw is a GUI-subsystem executable, so Task Scheduler never opens a
+    # console; the launcher then gives bash CREATE_NO_WINDOW as well.
+    command = str(pythonw)
+    engine_py = ROOT / "engine.py"
+    argument = f'"{engine_py}" spawn'
     account = os.environ.get("USERNAME", "")
     domain = os.environ.get("USERDOMAIN", "")
     if domain:
@@ -1059,7 +1104,7 @@ def _autostart_windows_install():
     task = _ps_quote(AUTOSTART_WINDOWS_TASK)
     script = (
         "$ErrorActionPreference = 'Stop'\n"
-        f"$action = New-ScheduledTaskAction -Execute {_ps_quote(bash)} "
+        f"$action = New-ScheduledTaskAction -Execute {_ps_quote(command)} "
         f"-Argument {_ps_quote(argument)} -WorkingDirectory {_ps_quote(str(ROOT))}\n"
         f"$trigger = New-ScheduledTaskTrigger -AtLogOn -User {_ps_quote(account)}\n"
         "$trigger.Delay = 'PT10S'\n"
@@ -1070,7 +1115,7 @@ def _autostart_windows_install():
         "-LogonType Interactive -RunLevel Limited\n"
         f"Register-ScheduledTask -TaskName {task} -Action $action -Trigger $trigger "
         "-Settings $settings -Principal $principal "
-        "-Description 'Start the Doomsday Connector MCP server at logon' -Force | Out-Null\n"
+        "-Description 'Start the Doomsday Connector MCP server at logon (silent)' -Force | Out-Null\n"
     )
     proc = _run_powershell(script)
     if proc.returncode != 0:
@@ -1079,7 +1124,7 @@ def _autostart_windows_install():
         return False
     write_log(
         "INFO", "AUTOSTART",
-        f"registered logon task '{AUTOSTART_WINDOWS_TASK}' account={account} bash={bash}",
+        f"registered silent logon task '{AUTOSTART_WINDOWS_TASK}' account={account} via {command}",
     )
     return True
 
@@ -1325,6 +1370,8 @@ def main():
         if msg:
             write_log(lvl, comp, msg)
         return 0
+    if mode == "spawn":
+        return 0 if spawn_hidden() else 1
     if mode == "autostart-install":
         ok = autostart_install()
         print("Autostart installed." if ok else "Autostart install failed (see logs/connector.log).")
@@ -1336,7 +1383,7 @@ def main():
     if mode == "autostart-status":
         print(json.dumps(autostart_status(), indent=2, ensure_ascii=False))
         return 0
-    print("usage: engine.py check|daemon|stop|init-config|env|status|log"
+    print("usage: engine.py check|daemon|stop|init-config|env|status|log|spawn"
           "|autostart-install|autostart-remove|autostart-status")
     return 2
 

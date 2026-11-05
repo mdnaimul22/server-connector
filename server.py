@@ -29,7 +29,7 @@ def kill_tree(pid, group=True):
     if IS_WIN:
         try:
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
-                           capture_output=True, timeout=15)
+                           capture_output=True, timeout=15, creationflags=no_window_flags())
         except Exception:
             pass
         return
@@ -64,9 +64,17 @@ def pid_alive(pid):
         return False
 
 
+def no_window_flags():
+    """Hide console windows; a console-less parent would otherwise flash one."""
+    return getattr(subprocess, "CREATE_NO_WINDOW", 0) if IS_WIN else 0
+
+
 def detached_kwargs():
     if IS_WIN:
-        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS}
+        # CREATE_NO_WINDOW (not DETACHED_PROCESS): a detached child gets a brand
+        # new console, which Windows 11 hands to WindowsTerminal and flashes on
+        # screen. CREATE_NO_WINDOW gives it a hidden console instead.
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | no_window_flags()}
     return {"start_new_session": True}
 
 
@@ -346,7 +354,7 @@ def sys_info():
                  "Get-Process | Sort-Object -Descending WorkingSet64 | Select-Object -First 8 "
                  "-Property Id,ProcessName,@{n='MB';e={[math]::Round($_.WorkingSet64/1MB)}} | "
                  "Format-Table -HideTableHeaders -AutoSize | Out-String -Width 110"],
-                capture_output=True, text=True, timeout=25,
+                capture_output=True, text=True, timeout=25, creationflags=no_window_flags(),
             )
             lines.extend(ln.rstrip() for ln in p.stdout.splitlines() if ln.strip())
         except Exception as e:
@@ -428,7 +436,7 @@ def list_dir(path="~"):
 def self_decide():
     root = Path(__file__).resolve().parent
     p = subprocess.run([os.sys.executable, "engine.py", "check"], cwd=str(root),
-                       capture_output=True, text=True, timeout=20)
+                       capture_output=True, text=True, timeout=20, creationflags=no_window_flags())
     output = (p.stdout or "") + ("\n" + p.stderr if p.stderr else "")
     return clip(output, True), p.returncode != 0
 

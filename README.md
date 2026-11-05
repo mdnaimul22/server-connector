@@ -29,6 +29,7 @@ chmod +x *.sh
 - Set `SHELL_BIN` in `config.yml` to override the shell, or to `"cmd"` to force classic `cmd.exe`.
 - `install.sh`, `start.sh`, and `stop.sh` ignore the Microsoft Store `python3` alias (it exits non-zero) and use the real interpreter from `%LOCALAPPDATA%\Programs\Python`.
 - Background jobs are launched through a small Python runner, so they survive server restarts and report their exit code and duration on both Windows and POSIX.
+- Nothing flashes a console window. The logon task runs `pythonw.exe` (GUI subsystem, so Task Scheduler never opens a console) and every child process — `bash`, `powershell`, `taskkill`, `ngrok`, the server and background jobs — is started with `CREATE_NO_WINDOW`. Verified with a window watcher across autostart, `run_command`, `start_job`, and the supervisor's 60-second health cycle.
 
 ## Setup
 
@@ -99,7 +100,7 @@ Each platform gets its own mechanism:
 
 | Platform | Mechanism |
 |---|---|
-| Windows | Task Scheduler task `DoomsdayConnector`: runs `bash start.sh` 10 seconds after you log on |
+| Windows | Task Scheduler task `DoomsdayConnector`: runs `pythonw.exe engine.py spawn` 10 seconds after you log on, which launches `start.sh` with no console window |
 | Termux | `~/.termux/boot/doomsday-connector.sh` (requires the Termux:Boot app) |
 | Linux | systemd user unit `doomsday-connector.service` (`systemctl --user`) |
 | macOS | LaunchAgent `dev.doomsday.connector.plist` |
