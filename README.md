@@ -30,6 +30,7 @@ chmod +x *.sh
 - `install.sh`, `start.sh`, and `stop.sh` ignore the Microsoft Store `python3` alias (it exits non-zero) and use the real interpreter from `%LOCALAPPDATA%\Programs\Python`.
 - Background jobs are launched through a small Python runner, so they survive server restarts and report their exit code and duration on both Windows and POSIX.
 - Nothing flashes a console window. The logon task runs `pythonw.exe` (GUI subsystem, so Task Scheduler never opens a console) and every child process — `bash`, `powershell`, `taskkill`, `ngrok`, the server and background jobs — is started with `CREATE_NO_WINDOW`. Verified with a window watcher across autostart, `run_command`, `start_job`, and the supervisor's 60-second health cycle.
+- Windows Defender false-positives the official ngrok **zip** as `Trojan:Win32/Kepavll!rfn` (the unpacked `ngrok.exe` scans clean). `install.sh` therefore downloads and unpacks the archive in memory and writes only `bin/ngrok.exe` to disk, so installs keep working with real-time protection on. Only if you download the zip yourself does it need an exclusion.
 
 ## Setup
 

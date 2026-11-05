@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Bounded decision, process supervisor, recovery, and config engine for Doomsday Connector."""
+import io
 import json
 import os
 import platform
@@ -141,14 +142,14 @@ def _ngrok_version(binary):
     return match.group(1) if match else ""
 
 
-def _download(url, destination):
+def _download_bytes(url):
     req = urllib.request.Request(url, headers={"User-Agent": "doomsday-connector/2.3.0"})
-    with urllib.request.urlopen(req, timeout=120) as resp, destination.open("wb") as out:
-        shutil.copyfileobj(resp, out)
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        return resp.read()
 
 
-def _extract_zip(archive, destination):
-    with zipfile.ZipFile(archive) as zf:
+def _extract_zip_bytes(payload, destination):
+    with zipfile.ZipFile(io.BytesIO(payload)) as zf:
         names = [n for n in zf.namelist() if Path(n).name in ("ngrok.exe", "ngrok")]
         if not names:
             raise RuntimeError("ngrok binary not found in archive")
@@ -156,8 +157,8 @@ def _extract_zip(archive, destination):
             shutil.copyfileobj(src, dst)
 
 
-def _extract_tgz(archive, destination):
-    with tarfile.open(archive, "r:gz") as tar:
+def _extract_tgz_bytes(payload, destination):
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as tar:
         member = next((m for m in tar.getmembers() if Path(m.name).name == "ngrok" and m.isfile()), None)
         if member is None:
             raise RuntimeError("ngrok binary not found in archive")
@@ -167,30 +168,34 @@ def _extract_tgz(archive, destination):
 
 
 def _install_ngrok_archive(os_name, arch, ext, verbose=False, hint=""):
-    """Download and unpack the standalone ngrok build for one platform."""
+    """Download and unpack the standalone ngrok build for one platform.
+
+    The archive is unpacked in memory and only the binary is written to disk.
+    Windows Defender false-positives the official ngrok *zip* as
+    Trojan:Win32/Kepavll!rfn and quarantines it, while the extracted ngrok.exe
+    scans clean — so never letting the archive touch the disk keeps installs
+    working with real-time protection enabled.
+    """
     url = NGROK_BASE_URL.format(os=os_name, arch=arch, ext=ext)
     label = f"{os_name}-{arch}"
     BIN_DIR.mkdir(exist_ok=True)
-    archive_path = BIN_DIR / f"ngrok.{ext}"
     if verbose:
         print(f"Downloading standalone ngrok ({label}) into {LOCAL_NGROK} ...")
     try:
-        _download(url, archive_path)
+        payload = _download_bytes(url)
         if ext == "zip":
-            _extract_zip(archive_path, LOCAL_NGROK)
+            _extract_zip_bytes(payload, LOCAL_NGROK)
         else:
-            _extract_tgz(archive_path, LOCAL_NGROK)
+            _extract_tgz_bytes(payload, LOCAL_NGROK)
         try:
             os.chmod(LOCAL_NGROK, 0o755)
         except OSError:
             pass
-        archive_path.unlink(missing_ok=True)
         write_log("INFO", "INSTALL", f"installed standalone ngrok ({label}) -> {LOCAL_NGROK}")
         if verbose:
             print("ngrok binary installed successfully.")
         return str(LOCAL_NGROK)
     except Exception as e:
-        archive_path.unlink(missing_ok=True)
         message = f"automatic ngrok download failed ({label}): {e}"
         if hint:
             message += f" | {hint}"
@@ -205,8 +210,9 @@ def _ensure_ngrok_windows(arch, verbose=False):
     #    (3.3.1 at the time of writing), and ngrok rejects agents older than 3.28.
     result = _install_ngrok_archive(
         "windows", arch, "zip", verbose,
-        hint=("Windows Defender may have blocked the download; add an exclusion for "
-              f"{BIN_DIR} or install ngrok manually from https://ngrok.com/download"),
+        hint=("the download was blocked; if Windows Defender flagged it, "
+              f"add an exclusion for {BIN_DIR} or install ngrok manually from "
+              "https://ngrok.com/download"),
     )
     if result:
         return result
