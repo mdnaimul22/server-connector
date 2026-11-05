@@ -1,9 +1,9 @@
 #!/usr/bin/env sh
 set -eu
 cd "$(dirname "$0")"
+. ./python_env.sh
 export PATH="$(pwd)/bin:$PATH"
-PYTHON="$(command -v python3 || command -v python || true)"
-if [ -z "$PYTHON" ]; then echo "ERROR: Python 3 is required; run ./install.sh first" >&2; exit 1; fi
+PYTHON="$(find_python3)" || { echo "ERROR: Python 3 is required; run ./install.sh first" >&2; exit 1; }
 "$PYTHON" engine.py init-config
 eval "$("$PYTHON" engine.py env)"
 if [ -z "${MCP_TOKEN:-}" ] || [ "$MCP_TOKEN" = "REPLACE_WITH_A_LONG_RANDOM_SECRET" ]; then

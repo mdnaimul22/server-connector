@@ -1009,6 +1009,295 @@ def format_status_banner(check_remote=True):
     return "\n".join(lines)
 
 
+AUTOSTART_WINDOWS_TASK = "DoomsdayConnector"
+
+
+def _find_bash():
+    # Prefer Git's wrapper over usr/bin/bash.exe: launched directly by Task
+    # Scheduler, the raw binary cannot resolve its own /usr/bin PATH (exit 127).
+    program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+    for candidate in (
+        program_files / "Git" / "bin" / "bash.exe",
+        program_files / "Git" / "usr" / "bin" / "bash.exe",
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    return shutil.which("bash") or ""
+
+
+def _msys_path(path):
+    text = str(path).replace("\\", "/")
+    if len(text) > 2 and text[1] == ":":
+        return "/" + text[0].lower() + text[2:]
+    return text
+
+
+def _ps_quote(value):
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _run_powershell(script, timeout=180):
+    return subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+        capture_output=True, text=True, timeout=timeout,
+    )
+
+
+def _autostart_windows_install():
+    bash = _find_bash()
+    if not bash:
+        write_log("ERROR", "AUTOSTART", "Git Bash was not found; cannot register the logon task")
+        return False
+    start_script = _msys_path(ROOT / "start.sh")
+    if " " in start_script:
+        start_script = f"'{start_script}'"
+    argument = f'-c "exec {start_script}"'
+    account = os.environ.get("USERNAME", "")
+    domain = os.environ.get("USERDOMAIN", "")
+    if domain:
+        account = f"{domain}\\{account}"
+    task = _ps_quote(AUTOSTART_WINDOWS_TASK)
+    script = (
+        "$ErrorActionPreference = 'Stop'\n"
+        f"$action = New-ScheduledTaskAction -Execute {_ps_quote(bash)} "
+        f"-Argument {_ps_quote(argument)} -WorkingDirectory {_ps_quote(str(ROOT))}\n"
+        f"$trigger = New-ScheduledTaskTrigger -AtLogOn -User {_ps_quote(account)}\n"
+        "$trigger.Delay = 'PT10S'\n"
+        "$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries "
+        "-DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew "
+        "-ExecutionTimeLimit ([TimeSpan]::Zero)\n"
+        f"$principal = New-ScheduledTaskPrincipal -UserId {_ps_quote(account)} "
+        "-LogonType Interactive -RunLevel Limited\n"
+        f"Register-ScheduledTask -TaskName {task} -Action $action -Trigger $trigger "
+        "-Settings $settings -Principal $principal "
+        "-Description 'Start the Doomsday Connector MCP server at logon' -Force | Out-Null\n"
+    )
+    proc = _run_powershell(script)
+    if proc.returncode != 0:
+        detail = ((proc.stderr or "") + (proc.stdout or "")).strip().replace("\n", " ")
+        write_log("ERROR", "AUTOSTART", f"Scheduled task registration failed: {detail[:300]}")
+        return False
+    write_log(
+        "INFO", "AUTOSTART",
+        f"registered logon task '{AUTOSTART_WINDOWS_TASK}' account={account} bash={bash}",
+    )
+    return True
+
+
+def _autostart_windows_remove():
+    task = _ps_quote(AUTOSTART_WINDOWS_TASK)
+    script = (
+        f"$t = Get-ScheduledTask -TaskName {task} -ErrorAction SilentlyContinue\n"
+        "if (-not $t) { 'NOT_INSTALLED'; exit 0 }\n"
+        f"Unregister-ScheduledTask -TaskName {task} -Confirm:$false\n"
+        "'REMOVED'\n"
+    )
+    proc = _run_powershell(script, timeout=60)
+    if proc.returncode != 0:
+        write_log("ERROR", "AUTOSTART", f"Scheduled task removal failed: {(proc.stderr or proc.stdout)[:300]}")
+        return False
+    write_log("INFO", "AUTOSTART", f"removed logon task '{AUTOSTART_WINDOWS_TASK}'")
+    return True
+
+
+def _autostart_windows_status():
+    task = _ps_quote(AUTOSTART_WINDOWS_TASK)
+    script = (
+        f"$t = Get-ScheduledTask -TaskName {task} -ErrorAction SilentlyContinue\n"
+        "if (-not $t) { 'NOT_INSTALLED'; exit 0 }\n"
+        f"$i = Get-ScheduledTaskInfo -TaskName {task}\n"
+        "'STATE=' + $t.State\n"
+        "'LAST_RUN=' + $i.LastRunTime\n"
+        "'LAST_RESULT=' + $i.LastTaskResult\n"
+    )
+    proc = _run_powershell(script, timeout=60)
+    raw = (proc.stdout or "").strip()
+    info = {
+        "platform": "windows",
+        "task": AUTOSTART_WINDOWS_TASK,
+        "installed": bool(raw) and "NOT_INSTALLED" not in raw,
+    }
+    for line in raw.splitlines():
+        if "=" in line:
+            key, _, value = line.partition("=")
+            info[key.strip().lower()] = value.strip()
+    if proc.returncode != 0 and not raw:
+        info["error"] = (proc.stderr or "").strip()[:200]
+    return info
+
+
+def _linux_unit_path():
+    return Path.home() / ".config" / "systemd" / "user" / "doomsday-connector.service"
+
+
+def _autostart_linux_install():
+    unit = _linux_unit_path()
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(
+        "[Unit]\n"
+        "Description=Doomsday Connector MCP server\n"
+        "After=network-online.target\n\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        "RemainAfterExit=yes\n"
+        f"WorkingDirectory={ROOT}\n"
+        f"ExecStart={shlex.quote(str(ROOT / 'start.sh'))}\n"
+        f"ExecStop={shlex.quote(str(ROOT / 'stop.sh'))}\n"
+        "TimeoutStartSec=120\n\n"
+        "[Install]\n"
+        "WantedBy=default.target\n",
+        encoding="utf-8",
+    )
+    for script in (ROOT / "start.sh", ROOT / "stop.sh"):
+        try:
+            os.chmod(script, 0o755)
+        except OSError:
+            pass
+    for args in (
+        ["systemctl", "--user", "daemon-reload"],
+        ["systemctl", "--user", "enable", "doomsday-connector.service"],
+    ):
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=60)
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout).strip().replace("\n", " ")
+            write_log("ERROR", "AUTOSTART", f"{' '.join(args)} failed: {detail[:200]}")
+            return False
+    write_log("INFO", "AUTOSTART", f"systemd user unit enabled: {unit}")
+    return True
+
+
+def _autostart_linux_remove():
+    unit = _linux_unit_path()
+    subprocess.run(["systemctl", "--user", "disable", "doomsday-connector.service"],
+                   capture_output=True, timeout=60)
+    unit.unlink(missing_ok=True)
+    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, timeout=60)
+    write_log("INFO", "AUTOSTART", "systemd user unit removed")
+    return True
+
+
+def _termux_boot_script_path():
+    return Path.home() / ".termux" / "boot" / "doomsday-connector.sh"
+
+
+def _autostart_termux_install():
+    script = _termux_boot_script_path()
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(
+        "#!/data/data/com.termux/files/usr/bin/sh\n"
+        "termux-wake-lock 2>/dev/null || true\n"
+        f"cd {shlex.quote(str(ROOT))} || exit 1\n"
+        "./start.sh >/dev/null 2>&1\n",
+        encoding="utf-8",
+    )
+    try:
+        os.chmod(script, 0o755)
+    except OSError:
+        pass
+    write_log("INFO", "AUTOSTART",
+              f"termux boot script written: {script} (requires the Termux:Boot app)")
+    return True
+
+
+def _autostart_termux_remove():
+    _termux_boot_script_path().unlink(missing_ok=True)
+    write_log("INFO", "AUTOSTART", "termux boot script removed")
+    return True
+
+
+def _darwin_plist_path():
+    return Path.home() / "Library" / "LaunchAgents" / "dev.doomsday.connector.plist"
+
+
+def _xml_escape(value):
+    return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _autostart_darwin_install():
+    plist = _darwin_plist_path()
+    plist.parent.mkdir(parents=True, exist_ok=True)
+    LOGS.mkdir(exist_ok=True)
+    plist.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0">\n'
+        "<dict>\n"
+        "  <key>Label</key><string>dev.doomsday.connector</string>\n"
+        "  <key>ProgramArguments</key>\n"
+        f"  <array><string>{_xml_escape(ROOT / 'start.sh')}</string></array>\n"
+        f"  <key>WorkingDirectory</key><string>{_xml_escape(ROOT)}</string>\n"
+        "  <key>RunAtLoad</key><true/>\n"
+        f"  <key>StandardOutPath</key><string>{_xml_escape(LOGS / 'autostart.log')}</string>\n"
+        f"  <key>StandardErrorPath</key><string>{_xml_escape(LOGS / 'autostart.err.log')}</string>\n"
+        "</dict>\n"
+        "</plist>\n",
+        encoding="utf-8",
+    )
+    try:
+        os.chmod(ROOT / "start.sh", 0o755)
+    except OSError:
+        pass
+    proc = subprocess.run(["launchctl", "load", "-w", str(plist)],
+                          capture_output=True, text=True, timeout=60)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().replace("\n", " ")
+        write_log("ERROR", "AUTOSTART", f"launchctl load failed: {detail[:200]}")
+        return False
+    write_log("INFO", "AUTOSTART", f"launchd agent loaded: {plist}")
+    return True
+
+
+def _autostart_darwin_remove():
+    plist = _darwin_plist_path()
+    subprocess.run(["launchctl", "unload", "-w", str(plist)], capture_output=True, timeout=60)
+    plist.unlink(missing_ok=True)
+    write_log("INFO", "AUTOSTART", "launchd agent removed")
+    return True
+
+
+def autostart_install():
+    kind = platform_kind()
+    if kind == "windows":
+        return _autostart_windows_install()
+    if kind == "termux":
+        return _autostart_termux_install()
+    if kind == "linux":
+        return _autostart_linux_install()
+    if kind == "darwin":
+        return _autostart_darwin_install()
+    write_log("ERROR", "AUTOSTART", f"autostart is not implemented for platform '{kind}'")
+    return False
+
+
+def autostart_remove():
+    kind = platform_kind()
+    if kind == "windows":
+        return _autostart_windows_remove()
+    if kind == "termux":
+        return _autostart_termux_remove()
+    if kind == "linux":
+        return _autostart_linux_remove()
+    if kind == "darwin":
+        return _autostart_darwin_remove()
+    return False
+
+
+def autostart_status():
+    kind = platform_kind()
+    if kind == "windows":
+        return _autostart_windows_status()
+    if kind == "termux":
+        path = _termux_boot_script_path()
+    elif kind == "linux":
+        path = _linux_unit_path()
+    elif kind == "darwin":
+        path = _darwin_plist_path()
+    else:
+        return {"platform": kind, "installed": False, "error": "unsupported platform"}
+    return {"platform": kind, "installed": path.is_file(), "path": str(path)}
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "check"
     if mode == "check":
@@ -1036,7 +1325,19 @@ def main():
         if msg:
             write_log(lvl, comp, msg)
         return 0
-    print("usage: engine.py check|daemon|stop|init-config|env|status|log")
+    if mode == "autostart-install":
+        ok = autostart_install()
+        print("Autostart installed." if ok else "Autostart install failed (see logs/connector.log).")
+        return 0 if ok else 1
+    if mode == "autostart-remove":
+        ok = autostart_remove()
+        print("Autostart removed." if ok else "Autostart removal failed (see logs/connector.log).")
+        return 0 if ok else 1
+    if mode == "autostart-status":
+        print(json.dumps(autostart_status(), indent=2, ensure_ascii=False))
+        return 0
+    print("usage: engine.py check|daemon|stop|init-config|env|status|log"
+          "|autostart-install|autostart-remove|autostart-status")
     return 2
 
 

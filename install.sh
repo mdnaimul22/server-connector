@@ -1,6 +1,19 @@
 #!/usr/bin/env sh
 set -eu
 cd "$(dirname "$0")"
+. ./python_env.sh
+
+AUTOSTART=0
+for arg in "$@"; do
+  case "$arg" in
+    --autostart) AUTOSTART=1 ;;
+    *)
+      echo "Unknown option: $arg" >&2
+      echo "Usage: ./install.sh [--autostart]" >&2
+      exit 2
+      ;;
+  esac
+done
 
 # ---------------------------------------------------------------------------
 # Platform detection happens once. Every install step afterwards is an
@@ -19,21 +32,6 @@ detect_platform() {
     MINGW*|MSYS*|CYGWIN*) echo windows ;;
     *) echo unknown ;;
   esac
-}
-
-python_works() {
-  "$1" -c 'import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)' >/dev/null 2>&1
-}
-
-find_python() {
-  # Skip dead shims (the Microsoft Store "python3" alias fails this probe).
-  for candidate in python3 python; do
-    if command -v "$candidate" >/dev/null 2>&1 && python_works "$candidate"; then
-      command -v "$candidate"
-      return 0
-    fi
-  done
-  return 1
 }
 
 install_termux() {
@@ -99,7 +97,7 @@ install_windows() {
 PLATFORM="$(detect_platform)"
 echo "Detected platform: $PLATFORM"
 
-if ! PYTHON="$(find_python)"; then
+if ! PYTHON="$(find_python3)"; then
   case "$PLATFORM" in
     termux) install_termux ;;
     linux) install_linux ;;
@@ -113,7 +111,7 @@ if ! PYTHON="$(find_python)"; then
       exit 1
       ;;
   esac
-  PYTHON="$(find_python)" || {
+  PYTHON="$(find_python3)" || {
     echo "Python 3 is still unavailable; install it and rerun." >&2
     exit 1
   }
@@ -134,5 +132,13 @@ esac
 
 mkdir -p logs
 "$PYTHON" engine.py init-config
-chmod +x start.sh stop.sh install.sh status.sh 2>/dev/null || true
+chmod +x start.sh stop.sh install.sh status.sh autostart.sh 2>/dev/null || true
+
+if [ "$AUTOSTART" -eq 1 ]; then
+  echo "Registering logon autostart for this platform..."
+  if ! "$PYTHON" engine.py autostart-install; then
+    echo "WARNING: autostart could not be registered; run ./autostart.sh install later." >&2
+  fi
+fi
+
 echo "Install complete. Edit config.yml if needed, then start with: ./start.sh"

@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 set -eu
 cd "$(dirname "$0")"
-PYTHON="$(command -v python3 || command -v python || true)"
-if [ -z "$PYTHON" ]; then echo "ERROR: Python 3 is required" >&2; exit 1; fi
+. ./python_env.sh
+PYTHON="$(find_python3)" || { echo "ERROR: Python 3 is required" >&2; exit 1; }
 exec "$PYTHON" engine.py status

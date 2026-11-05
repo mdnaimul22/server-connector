@@ -18,9 +18,9 @@ ROOT = Path(__file__).resolve().parent
 LOG_FILE = ROOT / "logs" / "connector.log"
 IS_WIN = os.name == "nt"
 GIT_BASH_CANDIDATES = (
-    Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "usr" / "bin" / "bash.exe",
     Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe",
-    Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Git" / "usr" / "bin" / "bash.exe",
+    Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "usr" / "bin" / "bash.exe",
+    Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Git" / "bin" / "bash.exe",
 )
 
 
@@ -74,13 +74,12 @@ def find_bash():
     """Locate a POSIX shell so Linux-style commands behave the same everywhere."""
     if not IS_WIN:
         return ""
-    found = shutil.which("bash")
-    if found:
-        return found
+    # Prefer Git's wrapper over usr/bin/bash.exe: the raw binary cannot resolve
+    # its own /usr/bin PATH when launched without an MSYS environment.
     for candidate in GIT_BASH_CANDIDATES:
         if candidate.is_file():
             return str(candidate)
-    return ""
+    return shutil.which("bash") or ""
 
 
 def resolve_shell_prefix(cfg):

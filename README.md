@@ -27,6 +27,7 @@ chmod +x *.sh
 - Paths can be either `C:/Users/you/file` or `/c/Users/you/file`.
 - Output is decoded as UTF-8 on every platform, so non-ASCII text (and stray binary bytes) no longer turns into `None` or raises decode errors.
 - Set `SHELL_BIN` in `config.yml` to override the shell, or to `"cmd"` to force classic `cmd.exe`.
+- `install.sh`, `start.sh`, and `stop.sh` ignore the Microsoft Store `python3` alias (it exits non-zero) and use the real interpreter from `%LOCALAPPDATA%\Programs\Python`.
 - Background jobs are launched through a small Python runner, so they survive server restarts and report their exit code and duration on both Windows and POSIX.
 
 ## Setup
@@ -82,7 +83,31 @@ Paste the **MCP Connector URL** into ChatGPT, Claude, or Antigravity MCP setting
 - `./start.sh` — start (or restart after editing `config.yml`) and print status
 - `./status.sh` — check live local + remote tunnel health and print URLs
 - `./stop.sh` — stop supervisor, server, engine, and tunnel processes
+- `./autostart.sh install|remove|status` — manage start-at-logon (see below)
+- `./install.sh [--autostart]` — set up Python/ngrok and optionally register autostart
 - `./upgrade.py check | apply` — validate and hot-swap `server.py.candidate` with automatic rollback if health checks fail
+
+## Auto-start when the machine starts
+
+```sh
+./autostart.sh install
+./autostart.sh status
+./autostart.sh remove
+```
+
+Each platform gets its own mechanism:
+
+| Platform | Mechanism |
+|---|---|
+| Windows | Task Scheduler task `DoomsdayConnector`: runs `bash start.sh` 10 seconds after you log on |
+| Termux | `~/.termux/boot/doomsday-connector.sh` (requires the Termux:Boot app) |
+| Linux | systemd user unit `doomsday-connector.service` (`systemctl --user`) |
+| macOS | LaunchAgent `dev.doomsday.connector.plist` |
+
+`./install.sh --autostart` registers it during install. On Windows the task runs at
+**logon**, with your normal user rights, so no admin or service installation is
+needed. Starting before anyone logs in would require an elevated `AtStartup` task
+or a real Windows service.
 
 ## Running on multiple machines
 
@@ -97,8 +122,10 @@ Free ngrok accounts allow 1 static domain and 1 active agent session per account
 config.yml          local config & secrets (gitignored)
 config.example.yml  template config
 server.py           MCP JSON-RPC server & tools
-engine.py           config loader, process supervisor & health watchdog
+engine.py           config loader, process supervisor, health watchdog, autostart
 upgrade.py          safe atomic updater with rollback
+python_env.sh       shared real-Python detection (skips Store shims)
 start.sh / stop.sh  service control
 status.sh           terminal status dashboard
+autostart.sh        start-at-logon management (per platform)
 ```
